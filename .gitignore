@@ -1,0 +1,30 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local outputs
+results/
+outputs/
+*.log
+
+# Large/private model or data artifacts
+artifacts/*.msgpack
+artifacts/*.pkl
+artifacts/*.npz
+*.csv
+*.tsv
+
+# Keep artifact documentation
+!artifacts/README.md

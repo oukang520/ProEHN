@@ -1,0 +1,39 @@
+project_name: ProEHN
+random_seed: 42
+
+kinetic:
+  d_model: 64
+  n_head_layers: 1
+  dropout_rate: 0.2
+  focal_gamma: 1.0
+  stop_threshold: 0.50
+  fallback_go_probability: 0.85
+
+topology:
+  top_n_genes: 12
+  max_batch_size: 64
+  max_active_events: 15
+  regularization_strength: 0.4
+  l1_ratio: 0.0
+  log_rate_clip_min: -20.0
+  log_rate_clip_max: 20.0
+  optimizer_maxiter: 500
+  use_bio_pure_features: true
+  min_mutations: 2
+  max_mutations: 15
+  core_drivers:
+    - EGFR
+    - TP53
+    - KRAS
+    - STK11
+    - KEAP1
+    - MET
+    - ALK
+    - BRAF
+    - ROS1
+    - RET
+
+artifacts:
+  kinetic_params: artifacts/proehn_kinetic_luad.msgpack
+  kinetic_metadata: artifacts/proehn_kinetic_luad_metadata.pkl
+  topology_model: artifacts/proehn_topology_luad.npz

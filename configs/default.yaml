@@ -1,0 +1,41 @@
+project_name: ProEHN
+random_seed: 42
+
+data:
+  patient_id_column: patient_id
+  seeding_column: Seeding
+  type_column: type
+  diagnosis_order_column: diag_order
+  stop_label_column: Patient_Label
+  primary_prefix: "P."
+  metastasis_prefix: "M."
+  mutation_suffix: " (M)"
+
+kinetic:
+  d_model: 128
+  n_head_layers: 2
+  dropout_rate: 0.2
+  focal_gamma: 2.0
+  learning_rate: 0.0001
+  batch_size: 32
+  num_epochs: 150
+  patience: 15
+  stop_threshold: 0.90
+  fallback_go_probability: 0.85
+
+topology:
+  top_n_genes: 20
+  max_batch_size: 1
+  max_active_events: 18
+  regularization_strength: 0.01
+  l1_ratio: 1.0
+  log_rate_clip_min: -20.0
+  log_rate_clip_max: 20.0
+  optimizer_maxiter: 500
+  use_bio_pure_features: false
+  core_drivers: []
+
+artifacts:
+  kinetic_params: artifacts/proehn_kinetic_params.msgpack
+  kinetic_metadata: artifacts/proehn_kinetic_metadata.pkl
+  topology_model: artifacts/proehn_topology_model.npz

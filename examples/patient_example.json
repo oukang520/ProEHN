@@ -1,0 +1,15 @@
+{
+  "Age_at_Diagnosis": 65,
+  "TMB": 8.4,
+  "nMut_Primary": 12,
+  "nMut_Metastatic": 0,
+  "CNA_Primary": 4,
+  "VAF_mean_Primary": 0.42,
+  "sex_male": 1,
+  "sex_female": 0,
+  "P.KRAS (M)": 1,
+  "P.TP53 (M)": 0,
+  "M.KRAS (M)": 0,
+  "M.TP53 (M)": 0,
+  "Seeding": 0
+}

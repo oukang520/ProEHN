@@ -1,0 +1,35 @@
+project_name: ProEHN
+random_seed: 42
+
+kinetic:
+  d_model: 128
+  n_head_layers: 2
+  dropout_rate: 0.2
+  stop_threshold: 0.60
+  fallback_go_probability: 0.85
+
+topology:
+  top_n_genes: 20
+  max_batch_size: 1
+  max_active_events: 20
+  regularization_strength: 0.0
+  l1_ratio: 1.0
+  log_rate_clip_min: -10.0
+  log_rate_clip_max: 6.0
+  optimizer_maxiter: 3000
+  use_bio_pure_features: false
+  core_drivers:
+    - BRAF
+    - NRAS
+    - CDKN2A
+    - TP53
+    - PTEN
+    - KIT
+    - BAP1
+    - NF1
+    - TERT
+
+artifacts:
+  kinetic_params: artifacts/proehn_kinetic_mela.msgpack
+  kinetic_metadata: artifacts/proehn_kinetic_mela_metadata.pkl
+  topology_model: artifacts/proehn_topology_mela.npz
