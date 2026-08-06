@@ -361,10 +361,11 @@ class PACAExampleExperiments:
             p_stop = self.kinetic.predict_stop_probability(patient)
             p_go = 1.0 - p_stop
             evolution_score = self._seeding_hazard(idx)
+            sample_type = pd.to_numeric(pd.Series([row.get("type", -1)]), errors="coerce").fillna(-1).iloc[0]
             result = {
                 "row_index": int(idx),
                 "label": int(labels[idx]) if labels[idx] in {0, 1} else -1,
-                "type": int(row.get("type", -1)),
+                "type": int(sample_type),
                 "p_stop": float(p_stop),
                 "p_go": float(p_go),
                 "evolution_only_score": evolution_score,
@@ -698,7 +699,9 @@ class PACAExampleExperiments:
     ) -> dict[str, pd.DataFrame]:
         """PACA ablation tables for Full ProEHN versus evolution-only."""
 
-        thresholds = tuple(thresholds or np.linspace(0.01, 0.99, 50))
+        if thresholds is None:
+            thresholds = np.linspace(0.01, 0.99, 50)
+        thresholds = tuple(float(value) for value in thresholds)
         ratios = tuple(float(value) for value in ratios)
         top_ks = tuple(int(value) for value in top_ks)
         stop_cases, go_cases = self._heldout_target_cases(random_seed=random_seed)
