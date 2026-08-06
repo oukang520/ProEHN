@@ -96,14 +96,15 @@ no ranked next-event hazards.
 
 ## PACA Example Experiments
 
-Pure-data example experiments for manuscript Fig.2A, Fig.3A-D and Fig.5B-C are
-available through:
+Pure-data example experiments for manuscript Fig.2A, Fig.3A-D, Fig.5B-C and
+PACA ablations are available through:
 
 ```bash
 python scripts/run_paca_examples.py \
   --topology-model artifacts/proehn_topology_paca.npz \
   --topology-data path/to/paca_topology_feature_table.csv \
   --kinetic-data path/to/paca_gatekeeper_feature_table.csv \
+  --experiments all \
   --out-dir results/paca_examples
 ```
 

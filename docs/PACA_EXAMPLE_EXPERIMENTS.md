@@ -33,6 +33,13 @@ Command output tables:
 - `fig5b_state_exit_raw`: patient-level raw state-exit probabilities.
 - `fig5c_multistep_trajectories`: recovered multi-step trajectory edges from the WT state.
 
+### PACA Ablation
+
+Command output tables:
+
+- `paca_ablation_topk_accuracy`: Full ProEHN versus evolution-only Top-k accuracy across Go ratios.
+- `paca_ablation_cindex`: Full ProEHN versus evolution-only survival C-index.
+
 ## Example Command
 
 ```bash
@@ -52,6 +59,17 @@ python scripts/run_paca_examples.py \
   --experiments fig3 fig5 \
   --topology-model artifacts/proehn_topology_paca.npz \
   --topology-data path/to/paca_topology_feature_table.csv
+```
+
+To run only the PACA ablation tables:
+
+```bash
+python scripts/run_paca_examples.py \
+  --experiments ablation \
+  --topology-model artifacts/proehn_topology_paca.npz \
+  --topology-data examples/paca_processed_data.csv \
+  --kinetic-params artifacts/proehn_kinetic_paca.msgpack \
+  --kinetic-metadata artifacts/proehn_kinetic_paca_metadata.pkl
 ```
 
 ## Data Requirements

@@ -23,12 +23,13 @@ def parse_args() -> argparse.Namespace:
         "--experiments",
         nargs="+",
         default=["fig2a", "fig3", "fig5"],
-        choices=["fig2a", "fig3", "fig5", "all"],
+        choices=["fig2a", "fig3", "fig5", "ablation", "all"],
         help="Experiments to run.",
     )
     parser.add_argument("--out-dir", default=None, help="Optional directory for CSV outputs.")
     parser.add_argument("--preview-rows", type=int, default=12, help="Rows shown in terminal previews.")
     parser.add_argument("--grid-size", type=int, default=31, help="Grid size for Fig.3A surface data.")
+    parser.add_argument("--n-sim", type=int, default=1000, help="Simulation size for PACA ablation Top-k accuracy.")
     return parser.parse_args()
 
 
@@ -57,7 +58,7 @@ def main() -> None:
     args = parse_args()
     selected = set(args.experiments)
     if "all" in selected:
-        selected = {"fig2a", "fig3", "fig5"}
+        selected = {"fig2a", "fig3", "fig5", "ablation"}
 
     runner = PACAExampleExperiments(
         topology_model_path=args.topology_model,
@@ -76,6 +77,9 @@ def main() -> None:
         all_tables.update(tables)
     if "fig5" in selected:
         tables = runner.fig5_trajectories()
+        all_tables.update(tables)
+    if "ablation" in selected:
+        tables = runner.ablation_full_vs_evolution(n_sim=args.n_sim)
         all_tables.update(tables)
 
     save_tables(all_tables, args.out_dir)

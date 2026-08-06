@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import random
 from typing import Any, Iterable, Mapping
 
 import numpy as np
@@ -257,6 +258,42 @@ def logrank_p_value(time_a: np.ndarray, event_a: np.ndarray, time_b: np.ndarray,
     return float(chi2.sf(statistic, df=1))
 
 
+def harrell_concordance_index(time: np.ndarray, predicted_score: np.ndarray, event: np.ndarray) -> float:
+    """Harrell C-index for survival scores where larger scores imply longer survival."""
+
+    time = np.asarray(time, dtype=float)
+    predicted_score = np.asarray(predicted_score, dtype=float)
+    event = np.asarray(event, dtype=int)
+    valid = np.isfinite(time) & np.isfinite(predicted_score) & np.isfinite(event)
+    time = time[valid]
+    predicted_score = predicted_score[valid]
+    event = event[valid]
+
+    concordant = 0.0
+    comparable = 0.0
+    n = len(time)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if time[i] == time[j]:
+                if event[i] == 1 and event[j] == 1:
+                    comparable += 1.0
+                    concordant += 1.0 if predicted_score[i] == predicted_score[j] else 0.5
+                continue
+            if time[i] < time[j] and event[i] == 1:
+                comparable += 1.0
+                if predicted_score[i] < predicted_score[j]:
+                    concordant += 1.0
+                elif predicted_score[i] == predicted_score[j]:
+                    concordant += 0.5
+            elif time[j] < time[i] and event[j] == 1:
+                comparable += 1.0
+                if predicted_score[j] < predicted_score[i]:
+                    concordant += 1.0
+                elif predicted_score[i] == predicted_score[j]:
+                    concordant += 0.5
+    return float(concordant / comparable) if comparable > 0 else float("nan")
+
+
 class PACAExampleExperiments:
     """Run pure-data example experiments corresponding to PACA manuscript panels."""
 
@@ -297,6 +334,89 @@ class PACAExampleExperiments:
             p_stop = self.kinetic.predict_stop_probability(patient)
             rows.append({"row_index": int(idx), "p_stop": p_stop, "p_go": 1.0 - p_stop})
         return pd.DataFrame(rows)
+
+    def _active_gene_indices(self, row_index: int) -> list[int]:
+        return [
+            gene_idx
+            for gene_idx in range(len(self.artifact.gene_names))
+            if self.X_genotypes[row_index, 2 * gene_idx] == 1
+            or self.X_genotypes[row_index, 2 * gene_idx + 1] == 1
+        ]
+
+    def _seeding_hazard(self, row_index: int) -> float:
+        seed_idx = len(self.artifact.gene_names)
+        theta = compute_patient_theta(self.artifact, self.X_features[row_index])
+        active = self._active_gene_indices(row_index)
+        log_rate = theta[seed_idx, seed_idx] + theta[seed_idx, active].sum()
+        return float(np.exp(log_rate))
+
+    def _patient_scores(self) -> pd.DataFrame:
+        labels = infer_stop_labels(self.topology_df)
+        time_col, status_col = _survival_columns(self.topology_df)
+        event = _event_indicator(self.topology_df[status_col]) if status_col else np.zeros(len(self.topology_df), dtype=int)
+
+        rows = []
+        for idx, row in self.topology_df.iterrows():
+            patient = row.to_dict()
+            p_stop = self.kinetic.predict_stop_probability(patient)
+            p_go = 1.0 - p_stop
+            evolution_score = self._seeding_hazard(idx)
+            result = {
+                "row_index": int(idx),
+                "label": int(labels[idx]) if labels[idx] in {0, 1} else -1,
+                "type": int(row.get("type", -1)),
+                "p_stop": float(p_stop),
+                "p_go": float(p_go),
+                "evolution_only_score": evolution_score,
+                "full_proehn_score": evolution_score * p_go,
+            }
+            if "patientID" in self.topology_df.columns:
+                result["patientID"] = row.get("patientID")
+            if time_col:
+                result["survival_time"] = float(pd.to_numeric(pd.Series([row.get(time_col)]), errors="coerce").iloc[0])
+            if status_col:
+                result["survival_event"] = int(event[idx])
+            rows.append(result)
+        return pd.DataFrame(rows)
+
+    def _heldout_target_cases(self, random_seed: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        labels = infer_stop_labels(self.topology_df)
+        chooser = random.Random(random_seed)
+        go_cases: list[dict[str, Any]] = []
+        stop_cases: list[dict[str, Any]] = []
+
+        for idx, row in self.topology_df.iterrows():
+            label = labels[idx]
+            if label == -1:
+                continue
+            patient = row.to_dict()
+            p_stop = self.kinetic.predict_stop_probability(patient)
+            if label == 1:
+                stop_cases.append({"stable": True, "p_stop": p_stop, "target_rank": None})
+                continue
+
+            active = self._active_gene_indices(idx)
+            if not active:
+                continue
+            target_idx = chooser.choice(active)
+            context = [gene_idx for gene_idx in active if gene_idx != target_idx]
+            candidates = [gene_idx for gene_idx in range(len(self.artifact.gene_names)) if gene_idx not in context]
+            theta = compute_patient_theta(self.artifact, self.X_features[idx])
+            scores = []
+            for gene_idx in candidates:
+                log_rate = theta[gene_idx, gene_idx] + theta[gene_idx, context].sum()
+                scores.append((gene_idx, float(log_rate)))
+            ranked = [gene_idx for gene_idx, _ in sorted(scores, key=lambda item: item[1], reverse=True)]
+            target_rank = ranked.index(target_idx) + 1 if target_idx in ranked else 999
+            go_cases.append(
+                {
+                    "stable": False,
+                    "p_stop": p_stop,
+                    "target_gene": self.artifact.gene_names[target_idx],
+                    "target_rank": int(target_rank),
+                }
+            )
+        return stop_cases, go_cases
 
     def fig2a_kinetic_gatekeeper(self, noise_levels: Iterable[float] = (0.0, 0.05, 0.10, 0.20, 0.30)) -> dict[str, pd.DataFrame]:
         """Fig.2A PACA pure-data outputs: metrics, robustness, KM and risk summaries."""
@@ -565,4 +685,114 @@ class PACAExampleExperiments:
             "fig5b_state_exit_probabilities": one_step_summary.reset_index(drop=True),
             "fig5b_state_exit_raw": one_step_raw,
             "fig5c_multistep_trajectories": pd.DataFrame(trajectory_rows),
+        }
+
+    def ablation_full_vs_evolution(
+        self,
+        ratios: Iterable[float] = (0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8),
+        top_ks: Iterable[int] = (1, 2, 3, 4, 5),
+        thresholds: Iterable[float] | None = None,
+        n_sim: int = 1000,
+        random_seed: int = 42,
+        min_subgroup_size: int = 10,
+    ) -> dict[str, pd.DataFrame]:
+        """PACA ablation tables for Full ProEHN versus evolution-only."""
+
+        thresholds = tuple(thresholds or np.linspace(0.01, 0.99, 50))
+        ratios = tuple(float(value) for value in ratios)
+        top_ks = tuple(int(value) for value in top_ks)
+        stop_cases, go_cases = self._heldout_target_cases(random_seed=random_seed)
+        rng = np.random.RandomState(random_seed)
+        topk_rows = []
+
+        for go_ratio in ratios:
+            n_go = int(n_sim * go_ratio)
+            n_stop = n_sim - n_go
+            batch: list[dict[str, Any]] = []
+            if go_cases and n_go > 0:
+                batch.extend(rng.choice(go_cases, n_go, replace=True).tolist())
+            if stop_cases and n_stop > 0:
+                batch.extend(rng.choice(stop_cases, n_stop, replace=True).tolist())
+
+            for top_k in top_ks:
+                evolution_hits = [
+                    (not item["stable"]) and int(item["target_rank"]) <= top_k
+                    for item in batch
+                ]
+                evolution_accuracy = float(np.mean(evolution_hits)) if batch else float("nan")
+
+                best_accuracy = float("nan")
+                best_threshold = float("nan")
+                for threshold in thresholds:
+                    full_hits = [
+                        (
+                            item["stable"]
+                            and item["p_stop"] > threshold
+                        )
+                        or (
+                            (not item["stable"])
+                            and item["p_stop"] <= threshold
+                            and int(item["target_rank"]) <= top_k
+                        )
+                        for item in batch
+                    ]
+                    accuracy = float(np.mean(full_hits)) if batch else float("nan")
+                    if np.isnan(best_accuracy) or accuracy > best_accuracy:
+                        best_accuracy = accuracy
+                        best_threshold = float(threshold)
+                topk_rows.append(
+                    {
+                        "go_ratio": go_ratio,
+                        "top_k": top_k,
+                        "n_simulated": int(len(batch)),
+                        "n_go": n_go,
+                        "n_stop": n_stop,
+                        "evolution_only_accuracy": evolution_accuracy,
+                        "full_proehn_accuracy": best_accuracy,
+                        "accuracy_gain": best_accuracy - evolution_accuracy,
+                        "full_proehn_threshold": best_threshold,
+                    }
+                )
+
+        scores = self._patient_scores()
+        cindex_rows = []
+        if {"survival_time", "survival_event"}.issubset(scores.columns):
+            valid = scores["survival_time"].notna()
+            valid &= np.isfinite(scores["survival_time"].to_numpy(dtype=float))
+            valid &= scores["survival_time"].to_numpy(dtype=float) > 0
+            survival_scores = scores.loc[valid].reset_index(drop=True)
+            subgroups: dict[str, pd.Series] = {
+                "Full Cohort": pd.Series(True, index=survival_scores.index),
+                "Type 1": survival_scores["type"] == 1,
+                "Type 3": survival_scores["type"] == 3,
+            }
+            full_score = survival_scores["full_proehn_score"].to_numpy(dtype=float)
+            time_all = survival_scores["survival_time"].to_numpy(dtype=float)
+            event_all = survival_scores["survival_event"].to_numpy(dtype=int)
+            base_ci = harrell_concordance_index(time_all, -full_score, event_all)
+            score_sign = -1.0 if base_ci >= 0.5 else 1.0
+            for group_name, mask in subgroups.items():
+                if int(mask.sum()) < min_subgroup_size:
+                    continue
+                group = survival_scores.loc[mask]
+                time = group["survival_time"].to_numpy(dtype=float)
+                event = group["survival_event"].to_numpy(dtype=int)
+                for model_name, score_col in [
+                    ("evolution-only", "evolution_only_score"),
+                    ("Full ProEHN", "full_proehn_score"),
+                ]:
+                    model_score = group[score_col].to_numpy(dtype=float)
+                    cindex_rows.append(
+                        {
+                            "group": group_name,
+                            "model": model_name,
+                            "n": int(len(group)),
+                            "events": int(event.sum()),
+                            "c_index": harrell_concordance_index(time, score_sign * model_score, event),
+                        }
+                    )
+
+        return {
+            "paca_ablation_topk_accuracy": pd.DataFrame(topk_rows),
+            "paca_ablation_cindex": pd.DataFrame(cindex_rows),
         }
