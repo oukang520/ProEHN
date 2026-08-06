@@ -11,10 +11,16 @@ from proehn.training import train_topology_from_csv
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train the ProEHN feature-modulated topology engine.")
+    parser = argparse.ArgumentParser(
+        description="Train the ProEHN feature-modulated topology engine."
+    )
     parser.add_argument("--config", required=True, help="YAML configuration file.")
-    parser.add_argument("--data", required=True, help="Input cohort CSV.")
-    parser.add_argument("--out", default=None, help="Output .npz artifact. Defaults to config artifacts.topology_model.")
+    parser.add_argument("--data", required=True, help="Input analysis-ready cohort CSV.")
+    parser.add_argument(
+        "--out",
+        default=None,
+        help="Output .npz artifact. Defaults to config artifacts.topology_model.",
+    )
     return parser.parse_args()
 
 

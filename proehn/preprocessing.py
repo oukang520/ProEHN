@@ -1,10 +1,10 @@
-"""Data preprocessing utilities for ProEHN core training."""
+"""Feature-table assembly utilities for ProEHN core training."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Any, Iterable, Mapping
+from typing import Iterable
 
 import jax.numpy as jnp
 import numpy as np
@@ -86,10 +86,17 @@ def rank_gene_pairs(
     """Rank genes by core-driver priority, seeding relevance and mutation frequency."""
 
     core_drivers = tuple(core_drivers)
-    seeding = df[seeding_column].fillna(0).astype(int) if seeding_column in df.columns else pd.Series(0, index=df.index)
+    seeding = (
+        df[seeding_column].fillna(0).astype(int)
+        if seeding_column in df.columns
+        else pd.Series(0, index=df.index)
+    )
     ranked: list[GenePair] = []
     for pair in gene_pairs:
-        is_mutated = ((df[pair.primary].fillna(0) == 1) | (df[pair.metastasis].fillna(0) == 1)).astype(int)
+        is_mutated = (
+            (df[pair.primary].fillna(0) == 1)
+            | (df[pair.metastasis].fillna(0) == 1)
+        ).astype(int)
         frequency = float(is_mutated.sum())
         if frequency > 0 and seeding.nunique() > 1 and is_mutated.std() > 1e-9:
             corr = seeding.corr(is_mutated)
@@ -97,11 +104,16 @@ def rank_gene_pairs(
         else:
             relevance = 0.0
         priority = 100.0 if any(driver in pair.name for driver in core_drivers) else 0.0
-        ranked.append(GenePair(pair.name, pair.primary, pair.metastasis, frequency, relevance, priority))
+        ranked.append(
+            GenePair(pair.name, pair.primary, pair.metastasis, frequency, relevance, priority)
+        )
     return sorted(ranked, key=lambda item: item.score, reverse=True)
 
 
-def calculate_marginal_rates(buckets: list[tuple[int, int, int, np.ndarray, np.ndarray]], n_events: int) -> jnp.ndarray:
+def calculate_marginal_rates(
+    buckets: list[tuple[int, int, int, np.ndarray, np.ndarray]],
+    n_events: int,
+) -> jnp.ndarray:
     """Warm-start basal hazards from marginal event frequencies."""
 
     n_total = n_events + 1
@@ -154,7 +166,11 @@ def select_numeric_feature_columns(
     return selected
 
 
-def standardize_features(df: pd.DataFrame, feature_columns: list[str], mean_impute: bool = False) -> tuple[np.ndarray, list[str]]:
+def standardize_features(
+    df: pd.DataFrame,
+    feature_columns: list[str],
+    mean_impute: bool = False,
+) -> tuple[np.ndarray, list[str]]:
     """Return z-scored covariates without the intercept column."""
 
     if not feature_columns:
@@ -209,24 +225,47 @@ def build_topology_training_data(
         excluded_columns=selected_gene_cols,
         use_bio_pure_features=use_bio_pure_features,
     )
-    features_norm, feature_names = standardize_features(df, feature_cols, mean_impute=use_bio_pure_features)
+    features_norm, feature_names = standardize_features(
+        df,
+        feature_cols,
+        mean_impute=use_bio_pure_features,
+    )
     features_with_bias = np.hstack([np.ones((len(df), 1), dtype=np.float64), features_norm])
 
-    gene_data = df[selected_gene_cols].apply(pd.to_numeric, errors="coerce").fillna(0).to_numpy(dtype=np.int8)
+    gene_data = (
+        df[selected_gene_cols]
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0)
+        .to_numpy(dtype=np.int8)
+    )
     diag_orders = df[diagnosis_order_column].fillna(1).to_numpy(dtype=np.int8)
     types = df[type_column].fillna(3).to_numpy(dtype=np.int8)
     n_events = len(gene_pairs)
     buckets: list[tuple[int, int, int, np.ndarray, np.ndarray]] = []
     skipped = 0
 
-    def add_to_bucket(bucket_type: int, n_primary: int, n_metastatic: int, data: np.ndarray, feats: np.ndarray) -> None:
+    def add_to_bucket(
+        bucket_type: int,
+        n_primary: int,
+        n_metastatic: int,
+        data: np.ndarray,
+        feats: np.ndarray,
+    ) -> None:
         nonlocal skipped
         if (n_primary + n_metastatic) > max_active_events:
             skipped += len(data)
             return
         for start in range(0, data.shape[0], max_batch_size):
             end = min(start + max_batch_size, data.shape[0])
-            buckets.append((bucket_type, int(n_primary), int(n_metastatic), data[start:end], feats[start:end]))
+            buckets.append(
+                (
+                    bucket_type,
+                    int(n_primary),
+                    int(n_metastatic),
+                    data[start:end],
+                    feats[start:end],
+                )
+            )
 
     if np.any(types == 1):
         mask = types == 1
@@ -277,7 +316,14 @@ def split_kinetic_feature_columns(all_columns: Iterable[str]) -> dict[str, list[
 
     groups = {"pt_genomic": [], "mt_genomic": [], "pt_dynamic": [], "mt_dynamic": [], "shared": []}
     dynamic_tokens = ("ageatseqrep", "vaf_mean", "nmut", "cna", "fga")
-    shared_tokens = ("age_at_diagnosis", "sex_female", "sex_male", "sex_unknown", "sex_nan", "paired")
+    shared_tokens = (
+        "age_at_diagnosis",
+        "sex_female",
+        "sex_male",
+        "sex_unknown",
+        "sex_nan",
+        "paired",
+    )
     label_tokens = ("label", "status", "pfs", "os", "vital", "response")
 
     for col in all_columns:
@@ -299,72 +345,38 @@ def split_kinetic_feature_columns(all_columns: Iterable[str]) -> dict[str, list[
     return groups
 
 
-def generate_stop_label(patient_row: Mapping[str, Any], params: Mapping[str, float], pt_driver_cols: list[str], mt_driver_cols: list[str]) -> int:
-    """Generate the source-code kinetic Stop label when no direct label is provided."""
-
-    pfs_threshold_days = float(params.get("PFS_LONG_THRESHOLD_MONTHS", 9.0)) * 30.4375
-    if patient_row.get("PFS_days_is_Missing", 1) == 0 and pd.notna(patient_row.get("PFS_days")):
-        return 1 if float(patient_row["PFS_days"]) >= pfs_threshold_days else 0
-
-    pt_exists = patient_row.get("nMut_Primary_is_Missing", 1) == 0
-    mt_exists = patient_row.get("nMut_Metastatic_is_Missing", 1) == 0
-    if not pt_exists and not mt_exists:
-        return -1
-
-    def compartment_score(prefix: str, driver_cols: list[str]) -> float:
-        nmut_key = f"nMut_{prefix}"
-        cna_key = f"CNA_{prefix}"
-        fga_key = f"FGA_{prefix}"
-        vaf_key = f"VAF_mean_{prefix}"
-        score = 0.0
-        if patient_row.get(f"{vaf_key}_is_Missing", 1) == 0 and pd.notna(patient_row.get(vaf_key)):
-            score += 1.0 if float(patient_row[vaf_key]) >= float(params.get("CLONALITY_HIGH_THRESH", 0.5)) else 0.0
-        cna_value = patient_row.get(cna_key, patient_row.get(fga_key, np.nan))
-        cna_thresh = float(params.get(f"CNA_LOW_THRESH_{'PT' if prefix == 'Primary' else 'MT'}", 10.0))
-        if pd.notna(cna_value) and float(cna_value) <= cna_thresh:
-            score += 0.5
-        nmut_thresh = float(params.get(f"NMUT_LOW_THRESH_{'PT' if prefix == 'Primary' else 'MT'}", 20.0))
-        if pd.notna(patient_row.get(nmut_key)) and float(patient_row[nmut_key]) <= nmut_thresh:
-            score += 0.5
-        if driver_cols:
-            driver_total = sum(float(patient_row.get(col, 0.0)) for col in driver_cols)
-            driver_thresh = float(params.get(f"DRIVER_LOW_THRESH_{'PT' if prefix == 'Primary' else 'MT'}", 3.0))
-            if driver_total <= driver_thresh:
-                score += 1.0
-        return score
-
-    stable_threshold = float(params.get("BIO_SCORE_STABLE_THRESH", 1.0))
-    pt_stable = compartment_score("Primary", pt_driver_cols) >= stable_threshold if pt_exists else False
-    mt_stable = compartment_score("Metastatic", mt_driver_cols) >= stable_threshold if mt_exists else False
-    if pt_exists and mt_exists:
-        return 1 if pt_stable and mt_stable else 0
-    if pt_exists:
-        return 1 if pt_stable else 0
-    if mt_exists:
-        return 1 if mt_stable else 0
-    return -1
-
-
 def build_kinetic_matrices(
     df: pd.DataFrame,
     label_column: str = "Patient_Label",
-    label_params: Mapping[str, float] | None = None,
 ) -> tuple[dict[str, np.ndarray], np.ndarray, dict[str, Any]]:
     """Build gatekeeper matrices and fitted scalers from a feature table."""
 
     groups = split_kinetic_feature_columns(df.columns)
-    if label_column in df.columns:
-        labels = df[label_column].fillna(-1).astype(int).to_numpy()
-    else:
-        label_params = label_params or {}
-        labels = df.apply(lambda row: generate_stop_label(row, label_params, groups["pt_genomic"], groups["mt_genomic"]), axis=1).astype(int).to_numpy()
+    if label_column not in df.columns:
+        raise ValueError(f"Kinetic training table is missing label column: {label_column}")
+    labels = df[label_column].fillna(-1).astype(int).to_numpy()
 
     matrices = {
         "pt_genomic": df[groups["pt_genomic"]].fillna(0).to_numpy(dtype=np.float32),
         "mt_genomic": df[groups["mt_genomic"]].fillna(0).to_numpy(dtype=np.float32),
-        "pt_dynamic": df[groups["pt_dynamic"]].apply(pd.to_numeric, errors="coerce").fillna(0).to_numpy(dtype=np.float32),
-        "mt_dynamic": df[groups["mt_dynamic"]].apply(pd.to_numeric, errors="coerce").fillna(0).to_numpy(dtype=np.float32),
-        "shared": df[groups["shared"]].apply(pd.to_numeric, errors="coerce").fillna(0).to_numpy(dtype=np.float32),
+        "pt_dynamic": (
+            df[groups["pt_dynamic"]]
+            .apply(pd.to_numeric, errors="coerce")
+            .fillna(0)
+            .to_numpy(dtype=np.float32)
+        ),
+        "mt_dynamic": (
+            df[groups["mt_dynamic"]]
+            .apply(pd.to_numeric, errors="coerce")
+            .fillna(0)
+            .to_numpy(dtype=np.float32)
+        ),
+        "shared": (
+            df[groups["shared"]]
+            .apply(pd.to_numeric, errors="coerce")
+            .fillna(0)
+            .to_numpy(dtype=np.float32)
+        ),
     }
     scalers: dict[str, StandardScaler] = {}
     for group in ["pt_dynamic", "mt_dynamic", "shared"]:

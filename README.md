@@ -3,8 +3,6 @@
 ProEHN is a context-aware evolutionary hazard network for cancer progression.
 The released code keeps the core method only: the kinetic gatekeeper, the
 feature-modulated topology engine, and the final next-event synthesis layer.
-Exploratory validation scripts, figure-generation code and intermediate plots are
-intentionally excluded from this cleaned research-code release.
 
 ## Method Summary
 
@@ -26,9 +24,6 @@ The framework has three stages:
 P(next=e | x_i,z_i) = P(Go | x_i,z_i) * lambda_e(x_i,z_i) / sum_{a in A(x_i)} lambda_a(x_i,z_i)
 ```
 
-The code follows the current source implementation when manuscript wording and
-implementation details differ.
-
 ## Repository Layout
 
 ```text
@@ -37,8 +32,8 @@ ProEHN/
     kinetic.py        # Kinetic gatekeeper architecture and inference wrapper
     topology.py       # Feature-modulated CTMC topology model
     engine.py         # Unified ProEHN prediction API
-    preprocessing.py  # Gene-pair selection, labels and likelihood buckets
-    training.py       # Core topology training routine
+    preprocessing.py  # Analysis-ready feature table assembly utilities
+    training.py       # Kinetic and topology training routines
     ctmc/             # Kronecker-factorized CTMC likelihood kernels
   configs/            # Default and cohort-specific parameters
   scripts/            # Minimal command-line entry points
@@ -58,6 +53,20 @@ python -m pip install -e .
 JAX installation can be platform-specific. If GPU acceleration is required,
 install the matching `jaxlib` wheel following the official JAX instructions, then
 install this package in editable mode.
+
+## Train the Kinetic Gatekeeper
+
+```bash
+python scripts/train_kinetic.py \
+  --config configs/cohorts/paca.yaml \
+  --data path/to/cohort_feature_table.csv \
+  --params-out artifacts/proehn_kinetic_paca.msgpack \
+  --metadata-out artifacts/proehn_kinetic_paca_metadata.pkl
+```
+
+The kinetic input table should be analysis-ready and contain the configured
+stop-label column, paired mutation columns and numeric covariates. The script
+does not derive labels from raw clinical fields.
 
 ## Train the Topology Engine
 
@@ -82,9 +91,8 @@ python scripts/predict_patient.py \
   --top-k 10
 ```
 
-If kinetic artifacts are absent, the engine uses the source-code fallback
-`P(Go)=0.85`. If topology artifacts are absent, the output contains kinetic
-probabilities but no ranked next-event hazards.
+If topology artifacts are absent, the output contains kinetic probabilities but
+no ranked next-event hazards.
 
 ## PACA Example Experiments
 
