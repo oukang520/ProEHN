@@ -96,8 +96,9 @@ no ranked next-event hazards.
 
 ## PACA Example Experiments
 
-Pure-data example experiments for manuscript Fig.2A, Fig.3A-D, Fig.5B-C and
-PACA ablations are available through:
+Pure-data example experiments for manuscript Fig.2A, Fig.3A-D, Fig.5B-C,
+PACA ablations, and the cleaned PACA MHN baseline benchmarks are available
+through:
 
 ```bash
 python scripts/run_paca_examples.py \

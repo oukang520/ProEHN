@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import random
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -13,6 +13,7 @@ from scipy.stats import chi2
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 from .kinetic import ProEHNKineticGatekeeper
+from .mhn_benchmarks import DEFAULT_PACA_MHN_TARGETS, run_paca_mhn_benchmark
 
 
 FEATURE_CATEGORIES = {
@@ -799,3 +800,30 @@ class PACAExampleExperiments:
             "paca_ablation_topk_accuracy": pd.DataFrame(topk_rows),
             "paca_ablation_cindex": pd.DataFrame(cindex_rows),
         }
+
+    def mhn_baseline_benchmark(
+        self,
+        targets: Sequence[str] = DEFAULT_PACA_MHN_TARGETS,
+        n_context_genes: int = 9,
+        n_splits: int = 5,
+        random_seed: int = 2026,
+        mhn_lambda: float = 0.01,
+        mhn_maxit: int = 5000,
+        hypertraps_iterations: int = 150,
+        hypertraps_walks: int = 15,
+        hypertraps_sigma: float = 0.1,
+    ) -> dict[str, pd.DataFrame]:
+        """PACA Oncotrees, HyperTraPS and MHN benchmark tables."""
+
+        return run_paca_mhn_benchmark(
+            self.topology_df,
+            targets=targets,
+            n_context_genes=n_context_genes,
+            n_splits=n_splits,
+            random_seed=random_seed,
+            mhn_lambda=mhn_lambda,
+            mhn_maxit=mhn_maxit,
+            hypertraps_iterations=hypertraps_iterations,
+            hypertraps_walks=hypertraps_walks,
+            hypertraps_sigma=hypertraps_sigma,
+        )

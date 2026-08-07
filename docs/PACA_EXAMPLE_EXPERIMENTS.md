@@ -40,6 +40,14 @@ Command output tables:
 - `paca_ablation_topk_accuracy`: Full ProEHN versus evolution-only Top-k accuracy across Go ratios.
 - `paca_ablation_cindex`: Full ProEHN versus evolution-only survival C-index.
 
+### PACA MHN Baseline Benchmark
+
+Command output tables:
+
+- `paca_mhn_benchmark_metrics`: cross-validated AUC-ROC, AUC-PR,
+  specificity at 90% sensitivity, and max MCC for Oncotrees, HyperTraPS, and MHN.
+- `paca_mhn_context_genes`: selected context genes for each PACA target.
+
 ## Example Command
 
 ```bash
@@ -70,6 +78,14 @@ python scripts/run_paca_examples.py \
   --topology-data examples/paca_processed_data.csv \
   --kinetic-params artifacts/proehn_kinetic_paca.msgpack \
   --kinetic-metadata artifacts/proehn_kinetic_paca_metadata.pkl
+```
+
+To run only the PACA MHN baseline benchmark:
+
+```bash
+python scripts/run_paca_examples.py \
+  --experiments mhn \
+  --topology-data examples/paca_processed_data.csv
 ```
 
 ## Data Requirements
