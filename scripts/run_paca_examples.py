@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from proehn.mhn_benchmarks import DEFAULT_PACA_MHN_TARGETS, run_paca_mhn_benchmark
 from proehn.paca_experiments import PACAExampleExperiments
+from proehn.paca_proehn_metrics import DEFAULT_PACA_PROEHN_TARGETS, run_paca_proehn_metrics
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
         "--experiments",
         nargs="+",
         default=["fig2a", "fig3", "fig5"],
-        choices=["fig2a", "fig3", "fig5", "ablation", "mhn", "all"],
+        choices=["fig2a", "fig3", "fig5", "ablation", "proehn_metrics", "all"],
         help="Experiments to run.",
     )
     parser.add_argument("--out-dir", default=None, help="Optional directory for CSV outputs.")
@@ -44,40 +44,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grid-size", type=int, default=31, help="Grid size for Fig.3A surface data.")
     parser.add_argument("--n-sim", type=int, default=1000, help="Simulation size for PACA ablation Top-k accuracy.")
     parser.add_argument(
-        "--mhn-targets",
+        "--proehn-targets",
         nargs="+",
         default=None,
-        help="Primary mutation targets for the PACA MHN benchmark.",
+        help="Primary mutation targets for PACA ProEHN metrics.",
     )
     parser.add_argument(
-        "--mhn-context-genes",
+        "--proehn-context-genes",
         type=int,
         default=9,
-        help="Number of context genes per MHN benchmark target.",
+        help="Number of context genes per ProEHN target.",
     )
     parser.add_argument(
-        "--mhn-cv-folds",
+        "--proehn-cv-folds",
         type=int,
         default=5,
-        help="Cross-validation folds for the PACA MHN benchmark.",
+        help="Cross-validation folds for PACA ProEHN metrics.",
     )
     parser.add_argument(
-        "--mhn-maxit",
+        "--proehn-maxit",
         type=int,
         default=5000,
-        help="Maximum BFGS iterations for regularized MHN fitting.",
+        help="Maximum BFGS iterations for topology fitting.",
     )
     parser.add_argument(
-        "--mhn-hypertraps-iterations",
-        type=int,
-        default=150,
-        help="HyperTraPS MCMC iterations per fold.",
+        "--proehn-vaf-threshold",
+        type=float,
+        default=0.5,
+        help="Fixed VAF threshold for the ProEHN gate.",
     )
     parser.add_argument(
-        "--mhn-hypertraps-walks",
-        type=int,
-        default=15,
-        help="HyperTraPS walks per likelihood estimate.",
+        "--proehn-nmut-threshold",
+        type=float,
+        default=20.0,
+        help="Fixed nMut threshold for the ProEHN gate.",
     )
     return parser.parse_args()
 
@@ -107,7 +107,7 @@ def main() -> None:
     args = parse_args()
     selected = set(args.experiments)
     if "all" in selected:
-        selected = {"fig2a", "fig3", "fig5", "ablation", "mhn"}
+        selected = {"fig2a", "fig3", "fig5", "ablation", "proehn_metrics"}
 
     runner = None
     if selected & {"fig2a", "fig3", "fig5", "ablation"}:
@@ -136,16 +136,16 @@ def main() -> None:
         assert runner is not None
         tables = runner.ablation_full_vs_evolution(n_sim=args.n_sim)
         all_tables.update(tables)
-    if "mhn" in selected:
-        targets = args.mhn_targets if args.mhn_targets is not None else DEFAULT_PACA_MHN_TARGETS
-        tables = run_paca_mhn_benchmark(
+    if "proehn_metrics" in selected:
+        targets = args.proehn_targets if args.proehn_targets is not None else DEFAULT_PACA_PROEHN_TARGETS
+        tables = run_paca_proehn_metrics(
             pd.read_csv(args.topology_data),
             targets=targets,
-            n_context_genes=args.mhn_context_genes,
-            n_splits=args.mhn_cv_folds,
-            mhn_maxit=args.mhn_maxit,
-            hypertraps_iterations=args.mhn_hypertraps_iterations,
-            hypertraps_walks=args.mhn_hypertraps_walks,
+            n_context_genes=args.proehn_context_genes,
+            n_splits=args.proehn_cv_folds,
+            mhn_maxit=args.proehn_maxit,
+            vaf_threshold=args.proehn_vaf_threshold,
+            nmut_threshold=args.proehn_nmut_threshold,
         )
         all_tables.update(tables)
 
