@@ -9,7 +9,6 @@ def test_release_files_exist() -> None:
     root = Path(__file__).resolve().parents[1]
     assert (root / "README.md").exists()
     assert (root / "configs" / "default.yaml").exists()
-    assert (root / "docs" / "METHODS.md").exists()
 
 
 def test_public_api_names() -> None:

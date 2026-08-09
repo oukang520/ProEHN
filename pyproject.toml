@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "proehn"
-version = "1.0.0"
+version = "1.0.1"
 description = "ProEHN: context-aware evolutionary hazard network for cancer progression."
 readme = "README.md"
 requires-python = ">=3.10"
