@@ -2,6 +2,10 @@
 
 ProEHN is a context-aware evolutionary hazard network for cancer progression.
 
+## Web application
+
+The research web interface is available at **[https://47.239.63.248/](https://47.239.63.248/)**.
+
 ## Install
 
 ```bash
