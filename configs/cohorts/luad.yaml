@@ -5,7 +5,7 @@ kinetic:
   d_model: 64
   n_head_layers: 1
   dropout_rate: 0.2
-  focal_gamma: 1.0
+  focal_gamma: 0.0
   stop_threshold: 0.50
   fallback_go_probability: 0.85
 

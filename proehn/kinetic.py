@@ -13,6 +13,7 @@ import optax
 from flax import linen as nn
 from flax import serialization
 from flax.training import train_state
+from .probability import KineticProbabilityProtocol, PlattCalibration
 
 
 class KineticGatekeeperNetwork(nn.Module):
@@ -174,6 +175,8 @@ class ProEHNKineticGatekeeper:
         self.params_path = Path(params_path) if params_path else None
         self.metadata_path = Path(metadata_path) if metadata_path else None
         self.fallback_go_probability = float(fallback_go_probability)
+        self.probability_protocol = KineticProbabilityProtocol()
+        self.calibration = None
         self.ready = False
         self.preprocessor = None
         self.model: KineticGatekeeperNetwork | None = None
@@ -189,6 +192,12 @@ class ProEHNKineticGatekeeper:
         with self.metadata_path.open("rb") as handle:
             metadata = pickle.load(handle)
 
+        if "probability_protocol" not in metadata:
+            raise ValueError("Formal kinetic artifact requires probability protocol provenance")
+        self.probability_protocol = KineticProbabilityProtocol(**metadata["probability_protocol"])
+        self.calibration = PlattCalibration(**metadata["calibration"]) if metadata.get("calibration") else None
+        if self.probability_protocol.calibration == "platt" and self.calibration is None:
+            raise ValueError("Missing fitted validation calibration")
         self.scalers = metadata.get("scalers", metadata.get("scaler", {}))
         self.feature_groups = metadata["feature_groups"]
         self.preprocessor = metadata.get("preprocessor")
@@ -237,6 +246,10 @@ class ProEHNKineticGatekeeper:
             inputs["shared"],
             train=False,
         )
+        if self.probability_protocol.calibration == "platt":
+            if self.calibration is None:
+                raise ValueError("Missing fitted validation calibration")
+            return float(self.calibration.transform(np.asarray(logits)).reshape(-1)[0])
         return float(np.asarray(jax.nn.sigmoid(logits)).reshape(-1)[0])
 
     def predict_go_probability(self, patient_data: Mapping[str, Any]) -> float:

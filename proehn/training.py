@@ -173,7 +173,9 @@ def fit_kinetic_model(training_df, validation_df, *, patient_id_column,
     """
     from .preprocessing import KineticPreprocessor, build_kinetic_matrices
     from .kinetic import ProEHNKineticGatekeeper, create_train_state, kinetic_loss_fn
+    from .probability import KineticProbabilityProtocol, PlattCalibration
     config = dict(model_config or {})
+    probability_protocol = KineticProbabilityProtocol(float(config.get('focal_gamma', 0.)), config.get('calibration', 'none'))
     train_ids, val_ids = training_df[patient_id_column], validation_df[patient_id_column]
     if train_ids.isna().any() or val_ids.isna().any() or set(train_ids) & set(val_ids):
         raise ValueError('Known, disjoint training and inner-validation patients required')
@@ -211,6 +213,12 @@ def fit_kinetic_model(training_df, validation_df, *, patient_id_column,
     gate = ProEHNKineticGatekeeper(None, None)
     gate.model = KineticGatekeeperNetwork(int(config.get('d_model', 128)), int(config.get('n_head_layers', 2)), float(config.get('dropout_rate', .2)))
     gate.params, gate.preprocessor, gate.feature_groups = best_params, prep, prep.feature_groups
+    gate.model_config.update(config)
+    gate.probability_protocol = probability_protocol
+    if probability_protocol.calibration == "platt":
+        logits = gate.model.apply({"params": best_params}, *[val_batch["x"][k] for k in ("pt_genomic", "pt_dynamic", "mt_genomic", "mt_dynamic", "shared")], train=False)
+        known = np.isin(yv, [0, 1])
+        gate.calibration = PlattCalibration.fit(np.asarray(logits)[known], yv[known], val_ids.to_numpy()[known], training_patient_ids=train_ids)
     gate.ready = True
     return gate
 
