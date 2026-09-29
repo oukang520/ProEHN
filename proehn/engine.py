@@ -158,10 +158,8 @@ class ProEHNEngine:
     def _probability_diagnostics(prob_go: float, rows: list[dict[str, Any]]) -> dict[str, Any]:
         """Expose probability-mass and boundary diagnostics without changing model scores.
 
-        The current artifacts do not contain a fitted post-hoc calibration layer, so raw
-        model probabilities are intentionally preserved.  These diagnostics make that
-        fact explicit and let the UI flag near-boundary inputs instead of silently
-        presenting a saturated value as a precisely calibrated 100% prediction.
+        The caller attaches the saved calibration method. Saturation describes
+        a numeric boundary, not confidence or evidence of clinical certainty.
         """
 
         conditional_mass = float(sum(row["topology_probability"] for row in rows))
@@ -192,12 +190,15 @@ class ProEHNEngine:
             pt, mt, seed = self._genotype_vectors(patient_data)
             return patient_transition_representation(self.topology_model, self.topology_params, z,
                 self.gene_names, pt, mt, seed)
-        kind = int(patient_data['observation_type'])
+        from .observations import ObservationType
+        kind = ObservationType(patient_data['observation_type'])
         def genotype(prefix):
             return [patient_data.get(f'{prefix}.{g} (M)', patient_data.get(f'{prefix}.{g}')) for g in self.gene_names]
         seed = patient_data.get('observed_seeding', patient_data.get('Seeding'))
         if seed is not None and (seed not in (0, 1) or (kind != 4 and seed != (0 if kind == 0 else 1))):
             raise ValueError('Seeding annotation conflicts with observation type')
+        if kind == 4 and seed is not None:
+            raise ValueError('Known seeding needs an explicit known-seeding observation type')
         return patient_transition_representation_observed(self.topology_model, self.topology_params, z,
             self.gene_names, genotype('P') if kind != 2 else None,
             genotype('M') if kind in (2, 3) else None, kind,
@@ -218,7 +219,7 @@ class ProEHNEngine:
             operational_stop_predicted=bool(1-prob_go > self.stop_threshold),
             integrated_event_scores=rows, probability_diagnostics=diagnostics,
             representation_kind=getattr(representation, 'representation_kind', 'fully_observed'),
-            terminal_probability=getattr(representation, 'terminal_probability', float(not rows)),
+            terminal_probability=getattr(representation, 'terminal_probability', sum(float(p) for key, p in zip(representation.accessible_events, representation.conditional_probabilities) if key[0] == 'terminal')),
             score_semantics='P(Go) times posterior-averaged conditional transition direction; no time horizon')
 
     def predict(self, patient_data: Mapping[str, Any]) -> dict[str, Any]:

@@ -11,10 +11,10 @@ from proehn.engine import ProEHNEngine
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Predict ProEHN next-event risks for one patient.")
+    parser = argparse.ArgumentParser(description="Predict ProEHN conditional event scores for one patient.")
     parser.add_argument("--config", required=True, help="YAML configuration file.")
     parser.add_argument("--patient", required=True, help="Patient JSON file.")
-    parser.add_argument("--top-k", type=int, default=10, help="Number of top next-event risks to print.")
+    parser.add_argument("--top-k", type=int, default=10, help="Number of top conditional event scores to print.")
     return parser.parse_args()
 
 
@@ -35,7 +35,7 @@ def main() -> None:
         log_rate_clip_max=config["topology"]["log_rate_clip_max"],
     )
     result = engine.predict(patient)
-    result["absolute_risks"] = result["absolute_risks"][: args.top_k]
+    result["integrated_event_scores"] = result["integrated_event_scores"][: args.top_k]
     print(json.dumps(result, indent=2))
 
 

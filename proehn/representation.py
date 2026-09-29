@@ -53,7 +53,10 @@ def patient_transition_representation(model, params, features_with_bias, gene_na
     theta, dp, dm = model.compute_patient_params(*model.parse_params(params), features_with_bias,
                                                model.log_rate_clip_min, model.log_rate_clip_max)
     rows = accessible_transition_log_rates(theta, gene_names, primary, metastasis, seeded)
-    probabilities = softmax([r['log_rate'] for r in rows]) if rows else np.empty(0)
+    if not rows:
+        return PatientTransitionRepresentation(np.asarray(theta), np.asarray(dp), np.asarray(dm),
+            (('terminal', 'No accessible event'),), np.ones(1))
+    probabilities = softmax([r['log_rate'] for r in rows])
     return PatientTransitionRepresentation(np.asarray(theta), np.asarray(dp), np.asarray(dm),
         tuple((r['compartment'], r['event']) for r in rows), probabilities)
 
@@ -114,6 +117,10 @@ def patient_transition_representation_observed(model, params, features_with_bias
     from .observations import ObservationType
     kind = ObservationType(observation_type)
     n = len(gene_names)
+    if joint_snapshot and kind != ObservationType.PAIRED:
+        raise ValueError('Joint snapshot requires both observed compartments')
+    if (kind in (0, 1, 4) and observed_metastasis is not None) or (kind == 2 and observed_primary is not None):
+        raise ValueError('Supplied genotype conflicts with partial-observation contract')
     def checked(value, required):
         if value is None:
             if required:

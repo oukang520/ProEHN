@@ -26,8 +26,11 @@ class TargetRecoverySpec:
     event_loci: tuple[tuple[str, tuple[str, ...]], ...]
     patient_id_column: str = 'patient_id'
     stop_label_column: str = 'Patient_Label'
+    event_schema_version: str = 'explicit-loci-v1'
 
     def __post_init__(self):
+        if not self.event_schema_version:
+            raise ValueError('Frozen event schema version required')
         if self.compartment not in ('primary', 'metastasis') or not self.masking_protocols:
             raise ValueError('Target compartment and raw masking provenance required')
         columns = dict(self.event_loci)
@@ -54,7 +57,11 @@ class TargetRecoverySpec:
         kinds = observation_types(raw)
         for protocol in self.masking_protocols:
             observed = np.isin(kinds, [0, 1, 3, 4] if protocol.compartment == 'Primary' else [2, 3])
-            part = build_leave_target_out_features(raw.loc[observed], protocol).reindex(raw.index)
+            required = protocol.mutation_columns + protocol.vaf_columns + protocol.cna_columns + protocol.baseline_columns
+            source = raw.loc[observed] if observed.any() else pd.DataFrame(columns=required, index=raw.index[:0])
+            part = build_leave_target_out_features(source, protocol).reindex(raw.index)
+            for baseline in protocol.baseline_columns:
+                part[baseline] = raw[baseline]
             metadata.update(part.attrs['feature_metadata'])
             for name in part:
                 if name in out and not out[name].equals(part[name]):
@@ -67,7 +74,7 @@ class TargetRecoverySpec:
         out = out[[c for c in out if c in allowed]]
         for name, loci in self.event_loci:
             present = kinds != 2 if name.startswith('P.') else np.isin(kinds, [2, 3])
-            out[name] = 0 if name in target_columns else raw[list(loci)].max(axis=1, skipna=False).where(present)
+            out[name] = 0 if name in target_columns else self._event_calls(raw, loci, present)
         out['observation_type'] = kinds
         if 'observed_seeding' in raw:
             seed = raw['observed_seeding'].to_numpy()
@@ -82,10 +89,34 @@ class TargetRecoverySpec:
         out.attrs['feature_metadata'] = metadata
         return out
 
+    @staticmethod
+    def _event_calls(raw, loci, observed):
+        calls = pd.Series(np.nan, index=raw.index)
+        if np.any(observed):
+            values = raw.loc[observed, list(loci)]
+            if not np.isin(values.to_numpy(), [0, 1]).all():
+                raise ValueError('Observed event loci require complete binary calls')
+            calls.loc[observed] = values.max(axis=1, skipna=False)
+        return calls
+
+    def outer_folds(self, raw, label_schema, policy):
+        """One frozen target-specific split; ineligible labels are an explicit error."""
+        from .evaluation import grouped_stratified_outer_folds, TargetNotEvaluable
+        require_frozen_label_protocol(label_schema)
+        kinds = observation_types(raw)
+        eligible = kinds != 2 if self.compartment == 'primary' else np.isin(kinds, [2, 3])
+        if not eligible.all():
+            raise TargetNotEvaluable('Target compartment is unobserved: freeze the eligible patient set before generating folds')
+        target = raw[list(dict(self.event_loci)[self.target_column()])].max(axis=1, skipna=False)
+        return grouped_stratified_outer_folds(raw[self.patient_id_column], target, target=self.target_column(),
+            policy=policy, kinetic_labels=build_progression_label(raw, label_schema))
+
     def training_frame(self, raw):
         out = self.features(raw)
+        kinds = observation_types(raw)
         for name, loci in self.event_loci:
-            out[name] = raw[list(loci)].max(axis=1, skipna=False)
+            observed = kinds != 2 if name.startswith('P.') else np.isin(kinds, [2, 3])
+            out[name] = self._event_calls(raw, loci, observed)
         for name in ('observation_type', 'type', 'diag_order', 'seeding_at_first_observation'):
             if name in raw:
                 out[name] = raw[name].to_numpy()

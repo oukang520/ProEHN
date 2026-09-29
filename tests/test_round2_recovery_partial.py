@@ -26,3 +26,14 @@ def test_partial_recovery_needs_no_seeding_or_metastatic_plugin_state():
     result=predictor.predict(safe)
     np.testing.assert_allclose(result[:,2],.3*result[:,1])
     assert np.isfinite(result).all()
+
+
+def test_absent_mt_raw_columns_and_shared_baseline_are_not_fake_measurements():
+    from dataclasses import replace
+    raw,spec=fixture()
+    raw=raw.drop(columns=['ma','mv']);raw['Age_at_Diagnosis']=[40,50]
+    spec=replace(spec,masking_protocols=tuple(replace(p,baseline_columns=('Age_at_Diagnosis',)) for p in spec.masking_protocols))
+    safe=spec.features(raw)
+    assert safe.Age_at_Diagnosis.tolist()==[40,50]
+    assert safe.nMut_Metastatic.isna().all()
+    assert spec.training_frame(raw)['M.A (M)'].isna().all()

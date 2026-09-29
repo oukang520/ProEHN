@@ -59,3 +59,31 @@ def test_terminal_mass_is_exposed_not_renormalized_away():
     assert result.terminal_probability==1
     assert result.accessible_events == (('terminal','No accessible event'),)
     assert result.conditional_probabilities.sum()==1
+
+
+def test_partial_contract_does_not_silently_ignore_extra_observations():
+    with pytest.raises(ValueError,match='conflicts'):
+        observed(*setup(),[0],[1],4)
+    with pytest.raises(ValueError,match='both'):
+        observed(*setup(),[0],None,4,joint_snapshot=True)
+
+
+@pytest.mark.parametrize('order',[0,1,2])
+def test_paired_posterior_and_likelihood_match_dense_two_phase_oracle(order):
+    model,_,z,g=setup()
+    params=jnp.linspace(-.4,.5,model.shapes.total_size)
+    theta,dp,dm=model.compute_patient_params(*model.parse_params(params),z)
+    target=jnp.ones(3,int)
+    q=np.column_stack([v.kronvec(theta,jnp.asarray(e),target) for e in np.eye(8)])
+    x=np.array([[(i>>b)&1 for b in range(3)] for i in range(8)])
+    dpdiag=np.asarray(v.diag_scal_p(dp,target,jnp.ones(8)))
+    dmdiag=np.asarray(v.diag_scal_m(dm,target,jnp.ones(8)))
+    first=np.linalg.solve(np.diag(dpdiag+dmdiag)-q,np.eye(8)[0])
+    a=dmdiag*np.linalg.solve(np.diag(dmdiag)-q,first*dpdiag*(x[:,0]==0))*(x[:,1]==1)
+    b=dpdiag*np.linalg.solve(np.diag(dpdiag)-q,first*dmdiag*(x[:,1]==1))*(x[:,0]==0)
+    mass=a+b if order==0 else a if order==1 else b
+    result=observed(model,params,z,g,[0],[1],3,diagnosis_order=order)
+    ix=result.posterior_states@np.array([1,2,4])
+    np.testing.assert_allclose(result.posterior_weights,mass[ix]/mass.sum(),rtol=1e-10)
+    loglik=[ll._lp_coupled_0,ll._lp_coupled_1,ll._lp_coupled_2][order](theta,dp,dm,jnp.array([0,1,1]),1,2)
+    np.testing.assert_allclose(np.exp(loglik),mass.sum(),rtol=1e-10)
