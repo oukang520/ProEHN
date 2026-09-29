@@ -252,3 +252,69 @@ def select_on_inner_validation(training, validation, candidates, fit_and_score, 
         if value < loss:
             best, loss = candidate, value
     return best
+
+
+class TargetNotEvaluable(ValueError):
+    """Prespecified fold/class coverage cannot be met; no performance-driven retry."""
+
+
+@dataclass(frozen=True)
+class GroupedStratificationPolicy:
+    outer_splits: int = 5
+    inner_splits: int = 4
+    minimum_positive_patients: int = 1
+    minimum_negative_patients: int = 1
+    minimum_labeled_kinetic_patients: int = 1
+    shuffle: bool = False
+    random_seed: int = 42
+
+    def __post_init__(self):
+        if self.outer_splits < 2 or self.inner_splits < 2 or min(self.minimum_positive_patients,self.minimum_negative_patients,self.minimum_labeled_kinetic_patients) < 1:
+            raise ValueError('Freeze positive fold counts and coverage constraints')
+
+
+def grouped_stratified_outer_folds(patient_ids, labels, *, target, policy, kinetic_labels=None):
+    """Freeze target-specific splits before fitting; count independent patients.
+
+    Multiple samples of a patient must agree on the stratification label. A
+    different aggregation of conflicting sample labels requires a separate,
+    prespecified biological target definition; it is not inferred here.
+    Missing stratification labels are not eligible. No seed search, fold-number
+    reduction or rebalancing based on model results is performed.
+    """
+    from sklearn.model_selection import StratifiedGroupKFold
+    groups=np.asarray(patient_ids); y=np.asarray(labels)
+    if groups.ndim!=1 or y.shape!=groups.shape or pd.isna(groups).any() or not np.isin(y,[0,1]).all():
+        raise TargetNotEvaluable(f'{target}: known patient IDs and binary target labels required')
+    unique=list(dict.fromkeys(groups.tolist())); uy=[]
+    ky=np.asarray(kinetic_labels) if kinetic_labels is not None else y
+    if ky.shape!=y.shape or not np.isin(ky,[-1,0,1]).all():
+        raise TargetNotEvaluable(f'{target}: invalid kinetic labels')
+    for patient in unique:
+        values=np.unique(y[groups==patient])
+        if len(values)!=1:
+            raise TargetNotEvaluable(f'{target}: inconsistent within-patient stratification labels')
+        uy.append(values[0])
+    unique=np.asarray(unique); uy=np.asarray(uy)
+    if len(unique)<policy.outer_splits or any(np.sum(uy==v)<policy.outer_splits*minimum for v,minimum in [(1,policy.minimum_positive_patients),(0,policy.minimum_negative_patients)]):
+        raise TargetNotEvaluable(f'{target}: insufficient class-bearing patients for frozen outer fold policy')
+    def splitter(n):
+        return StratifiedGroupKFold(n_splits=n,shuffle=policy.shuffle,
+                                   random_state=policy.random_seed if policy.shuffle else None)
+    def rows(patient_indices):
+        return tuple(np.flatnonzero(np.isin(groups,unique[patient_indices])))
+    result=[]
+    for i,(outer,test) in enumerate(splitter(policy.outer_splits).split(unique,uy,unique)):
+        if any(np.sum(uy[outer]==v)<policy.inner_splits for v in (0,1)):
+            raise TargetNotEvaluable(f'{target}: insufficient inner-fold class coverage')
+        train,val=next(splitter(policy.inner_splits).split(unique[outer],uy[outer],unique[outer]))
+        fold=BenchmarkFold(i,rows(outer[train]),rows(outer[val]),rows(test))
+        fold.validate(groups)
+        for partition in (fold.train,fold.validation,fold.test):
+            ix=np.asarray(partition)
+            positive=len(set(groups[ix][y[ix]==1])); negative=len(set(groups[ix][y[ix]==0]))
+            labeled=len(set(groups[ix][ky[ix]!=-1]))
+            if positive<policy.minimum_positive_patients or negative<policy.minimum_negative_patients or labeled<policy.minimum_labeled_kinetic_patients:
+                raise TargetNotEvaluable(f'{target}: fold {i} violates prespecified coverage constraints')
+        result.append(fold)
+    return tuple(result)
