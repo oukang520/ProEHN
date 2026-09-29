@@ -105,6 +105,9 @@ class FormalProEHNPredictor:
             raise TypeError('Formal fitted topology and kinetic components required')
 
     def predict(self, features):
+        return self._predict(features)
+
+    def _predict(self, features, *, progression_override=None):
         """Return [P(Go), conditional target score, integrated target score]."""
         for compartment in ('primary', 'metastasis'):
             if not (features[self.spec.target_column(compartment)] == 0).all():
@@ -116,7 +119,7 @@ class FormalProEHNPredictor:
             raise ValueError('Target absent from fitted topology')
         out = []
         for i, (_, row) in enumerate(features.iterrows()):
-            go = self.kinetic.predict_go_probability(row.to_dict())
+            go = self.kinetic.predict_go_probability(row.to_dict()) if progression_override is None else progression_override
             kind = int(row['observation_type'])
             representation = patient_transition_representation_observed(
                 self.topology, self.topology_params, np.r_[1., z[i]], genes,
