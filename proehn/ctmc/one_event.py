@@ -43,62 +43,16 @@ def R_i_inv_vec(
     return b
 
 
-def _lp_coupled_0(
-    log_theta: jnp.ndarray,
-    log_d_p: jnp.ndarray,
-    log_d_m: jnp.ndarray,
-    state_joint: jnp.ndarray,
-) -> jnp.ndarray:
-    """Paired likelihood with unknown diagnosis order; not exact synchrony."""
-
-    p0 = jnp.zeros(2).at[0].set(1.0)
-    d_m_le = jnp.exp(log_d_m[-1])
-    d_p_le = jnp.exp(log_d_p[-1])
-    pTh1_joint = R_i_inv_vec(log_theta, p0, d_p_le, d_m_le)
-    pf_cond = pTh1_joint * jnp.array([0.0, d_p_le])
-    mf_cond = pTh1_joint * jnp.array([0.0, d_m_le])
-
-    met = jnp.append(state_joint[1::2], 1)
-    pf_pTh2 = mhn.R_inv_vec(diagnosis_theta(log_theta, log_d_m), pf_cond, met, 1)
-
-    prim = state_joint[0::2]
-    theta_pt = diagnosis_theta(log_theta.at[:-1, -1].set(0.0), log_d_p)
-    mf_pTh2 = mhn.R_inv_vec(theta_pt, mf_cond, prim, 1)
-    return jnp.log(jnp.maximum(pf_pTh2[-1] + mf_pTh2[-1], 1e-50))
+def _lp_coupled_0(log_theta, log_d_p, log_d_m, state_joint):
+    from .likelihood import _lp_coupled_0 as general
+    return general(log_theta, log_d_p, log_d_m, state_joint, 1, 1)
 
 
-def _lp_coupled_1(
-    log_theta: jnp.ndarray,
-    log_d_p: jnp.ndarray,
-    log_d_m: jnp.ndarray,
-    state_joint: jnp.ndarray,
-) -> jnp.ndarray:
-    """Log-likelihood when primary tumor is observed before metastasis."""
-
-    p0 = jnp.zeros(2).at[0].set(1.0)
-    d_m_le = jnp.exp(log_d_m[-1])
-    d_p_le = jnp.exp(log_d_p[-1])
-    pTh1_joint = R_i_inv_vec(log_theta, p0, d_p_le, d_m_le)
-    pTh1_cond = jnp.append(jnp.zeros(1), pTh1_joint[-1] * d_p_le)
-    met = jnp.append(state_joint[1::2], 1)
-    pTh2 = mhn.R_inv_vec(diagnosis_theta(log_theta, log_d_m), pTh1_cond, met, 1)
-    return jnp.log(jnp.maximum(pTh2[-1], 1e-50))
+def _lp_coupled_1(log_theta, log_d_p, log_d_m, state_joint):
+    from .likelihood import _lp_coupled_1 as general
+    return general(log_theta, log_d_p, log_d_m, state_joint, 1, 1)
 
 
-def _lp_coupled_2(
-    log_theta: jnp.ndarray,
-    log_d_p: jnp.ndarray,
-    log_d_m: jnp.ndarray,
-    state_joint: jnp.ndarray,
-) -> jnp.ndarray:
-    """Log-likelihood when metastasis is observed before primary tumor."""
-
-    p0 = jnp.zeros(2).at[0].set(1.0)
-    d_m_le = jnp.exp(log_d_m[-1])
-    d_p_le = jnp.exp(log_d_p[-1])
-    pTh1_joint = R_i_inv_vec(log_theta, p0, d_p_le, d_m_le)
-    pTh1_cond = jnp.append(jnp.zeros(1), pTh1_joint[-1] * d_m_le)
-    prim = state_joint[0::2]
-    theta_pt = diagnosis_theta(log_theta.at[:-1, -1].set(0.0), log_d_p)
-    pTh2 = mhn.R_inv_vec(theta_pt, pTh1_cond, prim, 1)
-    return jnp.log(jnp.maximum(pTh2[-1], 1e-50))
+def _lp_coupled_2(log_theta, log_d_p, log_d_m, state_joint):
+    from .likelihood import _lp_coupled_2 as general
+    return general(log_theta, log_d_p, log_d_m, state_joint, 1, 1)

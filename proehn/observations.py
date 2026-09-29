@@ -40,7 +40,7 @@ OBSERVATION_SEMANTICS = {
     ObservationType.METASTASIS_ONLY: ObservationSemantics(
         'MT genotype', 'PT genotype and event times', 'observed 1', '_lp_met_obs'),
     ObservationType.PAIRED: ObservationSemantics(
-        'PT and MT genotypes; seeding confirmed by first observation; diagnosis order if known', 'event times; unknown order',
+        'PT and MT genotypes; seeding occurred by final observation (not necessarily first); diagnosis order if known', 'event times; unknown order',
         'observed 1', '_lp_coupled_0/1/2 by DiagnosisOrder'),
     ObservationType.PRIMARY_SEEDING_UNKNOWN: ObservationSemantics(
         'PT genotype', 'seeding, MT genotype, event times',
@@ -60,3 +60,5 @@ def observation_types(training_df, type_column='type'):
     if not np.isin(values, list(ObservationType)).all():
         raise ValueError('Unknown/missing observation type; do not infer from outcomes')
     return values.astype(int)
+
+OBSERVATION_SEMANTICS_VERSION = "paired-two-phase-v2"

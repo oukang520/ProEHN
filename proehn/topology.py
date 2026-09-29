@@ -147,6 +147,7 @@ class ProEHNTopologyModel:
         features: jnp.ndarray,
         state_joint: jnp.ndarray,
         diag_order: jnp.ndarray,
+        first_seeding: jnp.ndarray,
         n_prim_static: int,
         n_met_static: int,
         clip_min: float,
@@ -157,13 +158,13 @@ class ProEHNTopologyModel:
         nm_s = int(n_met_static)
 
         def sync(_: None) -> jnp.ndarray:
-            return ctmc_likelihood._lp_coupled_0(theta, log_dp, log_dm, state_joint, np_s, nm_s)
+            return ctmc_likelihood._lp_coupled_0(theta, log_dp, log_dm, state_joint, np_s, nm_s, first_seeding)
 
         def pt_first(_: None) -> jnp.ndarray:
-            return ctmc_likelihood._lp_coupled_1(theta, log_dp, log_dm, state_joint, np_s, nm_s)
+            return ctmc_likelihood._lp_coupled_1(theta, log_dp, log_dm, state_joint, np_s, nm_s, first_seeding)
 
         def mt_first(_: None) -> jnp.ndarray:
-            return ctmc_likelihood._lp_coupled_2(theta, log_dp, log_dm, state_joint, np_s, nm_s)
+            return ctmc_likelihood._lp_coupled_2(theta, log_dp, log_dm, state_joint, np_s, nm_s, first_seeding)
 
         return jax.lax.switch(diag_order.astype(int), [sync, pt_first, mt_first], None)
 
@@ -200,13 +201,15 @@ class ProEHNTopologyModel:
             joint_len = 2 * self.n_events + 1
             b_joint = bucket_genotypes[:, :joint_len]
             b_order = bucket_genotypes[:, -1]
-            lls = vmap(self._loss_type3, in_axes=(None, None, None, 0, 0, 0, None, None, None, None))(
+            b_first = bucket_genotypes[:, joint_len] if bucket_genotypes.shape[1] == joint_len+2 else jnp.full(len(b_order), -1)
+            lls = vmap(self._loss_type3, in_axes=(None, None, None, 0, 0, 0, 0, None, None, None, None))(
                 W_theta,
                 W_dp,
                 W_dm,
                 bucket_features,
                 b_joint,
                 b_order,
+                b_first,
                 n_primary,
                 n_metastatic,
                 clip_min,

@@ -107,7 +107,7 @@ def obs_states(n_joint, state, pt_first):
     n = (state.shape[0]-1)//2
     observed = x[:, 0:2*n:2] if pt_first else x[:, 1:2*n:2]
     target = state[0:2*n:2] if pt_first else state[1:2*n:2]
-    return (jnp.all(observed == target, axis=1) & (x[:, -1] == 1)).astype(float)
+    return (jnp.all(observed == target, axis=1) & (True if pt_first else x[:, -1] == 1)).astype(float)
 
 
 @partial(jit, static_argnames=['transpose', 'n_state'])

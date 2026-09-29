@@ -206,11 +206,13 @@ def build_topology_training_data(
             np_, nm_ = 0, int(m[i].sum())+1
             active = nm_
         else:
-            if 'seeding_at_first_observation' not in df or df['seeding_at_first_observation'].iloc[i] != 1:
-                raise ValueError('UNRESOLVED_SCIENTIFIC_DECISION: paired likelihood requires confirmed seeding by first observation; later MT alone is insufficient')
+            first_seed = df['seeding_at_first_observation'].iloc[i] if 'seeding_at_first_observation' in df else -1
+            first_seed = -1 if pd.isna(first_seed) else first_seed
+            if first_seed not in (-1, 0, 1) or (orders[i] == 2 and first_seed == 0):
+                raise ValueError('MT-first observation requires seeding; invalid first-observation seeding annotation')
             if orders[i] not in (0, 1, 2):
                 raise ValueError('Diagnosis order must be 0 unknown, 1 PT-first or 2 MT-first')
-            data = np.r_[np.column_stack((p[i], m[i])).ravel(), 1, orders[i]]
+            data = np.r_[np.column_stack((p[i], m[i])).ravel(), 1, first_seed, orders[i]]
             # Each single compartment count INCLUDES the shared seed bit.
             np_, nm_ = int(p[i].sum())+1, int(m[i].sum())+1
             active = np_+nm_-1

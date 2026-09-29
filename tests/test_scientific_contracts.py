@@ -489,11 +489,11 @@ def test_undocumented_legacy_summary_units_block_new_fitting():
         validate_genomic_summary_units(frame)
 
 
-def test_paired_sample_does_not_prove_seeding_at_first_observation():
+def test_pt_first_paired_sample_does_not_require_seeding_at_first_observation():
     frame = tiny_frame(6).iloc[:1].copy()
     frame['observation_type'] = 3
-    with pytest.raises(ValueError, match='UNRESOLVED_SCIENTIFIC_DECISION'):
-        build_topology_training_data(frame)
+    frame['diag_order'] = 1
+    assert build_topology_training_data(frame)[3] == 1
 
 
 def test_foldwise_survival_thresholds_preserve_test_isolation():
