@@ -29,3 +29,23 @@ def test_fixed_risk_direction_and_validation_only_km():
     assert 0<=logrank(oof,threshold)['p_value']<=1
     with pytest.raises(ValueError,match='overlap'):
         oof.km_groups(CalibratedThreshold(.5,'validation',('a',)))
+
+
+def test_cox_requires_aligned_confounders_and_names_analysis_explicitly(monkeypatch):
+    import sys
+    import pandas as pd
+    from types import SimpleNamespace
+    from proehn.survival import cox_proportional_hazards
+    seen=[]
+    class FakeCox:
+        def fit(self,frame,**kwargs):
+            seen.append(frame.copy())
+            return self
+    monkeypatch.setitem(sys.modules,'lifelines',SimpleNamespace(CoxPHFitter=FakeCox))
+    oof=toy()
+    assert cox_proportional_hazards(oof)['analysis']=='univariable'
+    confounders=pd.DataFrame({'baseline_age':[40,45,50,55,60,65]},index=list('abcdef'))
+    assert cox_proportional_hazards(oof,baseline_confounders=confounders)['analysis']=='multivariable'
+    assert 'baseline_age' in seen[-1]
+    with pytest.raises(ValueError,match='aligned'):
+        cox_proportional_hazards(oof,baseline_confounders=confounders.iloc[::-1])
