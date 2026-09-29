@@ -16,5 +16,3 @@ def test_projection_is_not_a_clustering_representation_and_pca_fits_training_onl
     pca.transform(RepresentationMatrix(('test',),np.ones((1,2))*100,'vectorized_theta','toy-v1'))
     assert len(seen)==1 and seen[0].max()==5
     assert select_cluster_number(train,[2],lambda x,k:0.)==2
-
-
