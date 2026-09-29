@@ -104,9 +104,12 @@ def calculate_marginal_rates(buckets: list[tuple[int, int, int, np.ndarray, np.n
     n_total = n_events + 1
     event_counts = np.zeros(n_total)
     total_samples = 0
+    known_seeding_samples = 0
     for bucket_type, _, _, bucket_genes, _ in buckets:
         genes = np.asarray(bucket_genes)
         total_samples += len(genes)
+        if bucket_type != 4:
+            known_seeding_samples += len(genes)
         if bucket_type in (0, 1, 2, 4):
             event_counts[:n_events] += genes[:, :n_events].sum(axis=0)
             if bucket_type in (1, 2):
@@ -116,6 +119,8 @@ def calculate_marginal_rates(buckets: list[tuple[int, int, int, np.ndarray, np.n
             event_counts[n_events] += len(genes)
 
     freqs = np.clip(event_counts / (total_samples + 1e-9), 0.01, 0.99)
+    # Unknown seeding contributes mutation observations, never seed negatives.
+    freqs[-1] = np.clip(event_counts[-1] / known_seeding_samples, .01, .99) if known_seeding_samples else .5
     return jnp.array(np.log(freqs / (1.0 - freqs)), dtype=jnp.float64)
 
 
