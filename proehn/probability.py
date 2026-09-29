@@ -24,6 +24,10 @@ class PlattCalibration:
     intercept: float
     validation_patient_ids: tuple[str,...]
 
+    def __post_init__(self):
+        if not np.isfinite([self.slope, self.intercept]).all() or self.slope < 0 or not self.validation_patient_ids:
+            raise ValueError('Finite monotone calibration and validation provenance required')
+
     def transform(self, logits):
         x=np.asarray(logits,float)
         if not np.isfinite(x).all():

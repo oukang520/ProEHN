@@ -135,6 +135,21 @@ class FormalProEHNPredictor:
         if not isinstance(self.topology, ProEHNTopologyModel) or not isinstance(self.kinetic, ProEHNKineticGatekeeper) or not self.kinetic.ready:
             raise TypeError('Formal fitted topology and kinetic components required')
 
+    def save_topology(self, path):
+        from .artifacts import ScientificArtifactMetadata, save_topology_artifact
+        protocol = dict(getattr(self.kinetic, 'scientific_training_protocol', {}))
+        if not protocol or not hasattr(self, 'selection_metadata'):
+            raise ValueError('Formal artifact requires completed training/selection provenance')
+        protocol['selection'] = self.selection_metadata
+        prep = self.topology_preprocessor.covariates
+        model = self.topology
+        meta = ScientificArtifactMetadata(tuple(g.name for g in self.topology_preprocessor.gene_pairs),
+            tuple(prep.feature_names), tuple(prep.columns), prep.metadata(), model.log_rate_clip_min,
+            model.log_rate_clip_max, {k:getattr(model,k) for k in ('regularization_strength','l1_ratio','l2_floor')},
+            self.spec.event_schema_version, protocol['training_feature_provenance_version'], training_protocol=protocol)
+        save_topology_artifact(path, self.topology_params, meta)
+
+
     def predict(self, features):
         return self._predict(features)
 

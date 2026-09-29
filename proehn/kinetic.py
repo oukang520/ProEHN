@@ -37,17 +37,23 @@ class KineticGatekeeperNetwork(nn.Module):
         x_pt_d = nn.Dropout(rate=dynamic_dropout_rate, deterministic=not train)(x_pt_d)
         x_mt_d = nn.Dropout(rate=dynamic_dropout_rate, deterministic=not train)(x_mt_d)
 
-        pt_features = nn.Dense(features=self.d_model)(jnp.concatenate([x_pt_g, x_pt_d], axis=-1))
+        def dense_input(values, width):
+            # A frozen schema may have an empty branch: a (0,width) zero kernel
+            # gives an explicit bias-only map, without inventing a covariate.
+            initializer = nn.initializers.zeros_init() if values.shape[-1] == 0 else nn.initializers.lecun_normal()
+            return nn.Dense(features=width, kernel_init=initializer)(values)
+
+        pt_features = dense_input(jnp.concatenate([x_pt_g, x_pt_d], axis=-1), self.d_model)
         pt_features = nn.LayerNorm(epsilon=1e-5)(pt_features)
         pt_features = nn.relu(pt_features)
         pt_features = nn.Dropout(rate=self.dropout_rate)(pt_features, deterministic=not train)
 
-        mt_features = nn.Dense(features=self.d_model)(jnp.concatenate([x_mt_g, x_mt_d], axis=-1))
+        mt_features = dense_input(jnp.concatenate([x_mt_g, x_mt_d], axis=-1), self.d_model)
         mt_features = nn.LayerNorm(epsilon=1e-5)(mt_features)
         mt_features = nn.relu(mt_features)
         mt_features = nn.Dropout(rate=self.dropout_rate)(mt_features, deterministic=not train)
 
-        shared_features = nn.Dense(features=max(1, self.d_model // 2))(x_shared)
+        shared_features = dense_input(x_shared, max(1, self.d_model // 2))
         shared_features = nn.LayerNorm(epsilon=1e-5)(shared_features)
         shared_features = nn.relu(shared_features)
 
@@ -194,6 +200,10 @@ class ProEHNKineticGatekeeper:
 
         if "probability_protocol" not in metadata:
             raise ValueError("Formal kinetic artifact requires probability protocol provenance")
+        if metadata.get('scientific_contract_version') != 3 or not metadata.get('scientific_training_protocol'):
+            raise ValueError('Incomplete formal kinetic artifact provenance')
+        self.scientific_training_protocol = metadata['scientific_training_protocol']
+        self._validate_training_protocol(self.scientific_training_protocol)
         self.probability_protocol = KineticProbabilityProtocol(**metadata["probability_protocol"])
         self.calibration = PlattCalibration(**metadata["calibration"]) if metadata.get("calibration") else None
         if self.probability_protocol.calibration == "platt" and self.calibration is None:
@@ -211,6 +221,33 @@ class ProEHNKineticGatekeeper:
         variables = self.model.init(jax.random.PRNGKey(0), *dummy_inputs, train=False)
         self.params = serialization.from_bytes(variables["params"], self.params_path.read_bytes())
         self.ready = True
+
+    @staticmethod
+    def _validate_training_protocol(protocol):
+        from .features import FrozenCovariateProtocol
+        label = protocol.get('label_protocol', {})
+        required = ('schema_id', 'version', 'cohort', 'source_variables', 'threshold', 'unit')
+        if any(not label.get(k) for k in required) or label['unit'] != 'days' or not np.isfinite(label['threshold']) or label['threshold'] <= 0:
+            raise ValueError('Kinetic artifact requires complete frozen clinical label provenance')
+        FrozenCovariateProtocol(**protocol.get('covariates', {})).validate()
+        if not protocol.get('event_schema_version') or not protocol.get('training_feature_provenance_version'):
+            raise ValueError('Kinetic artifact requires event/feature provenance versions')
+
+    def save(self, params_path, metadata_path):
+        """Save the fitted network, train-only preprocessing and validation calibration."""
+        from dataclasses import asdict
+        if not self.ready or self.preprocessor is None or not getattr(self, 'scientific_training_protocol', None):
+            raise ValueError('Complete fitted formal kinetic provenance required')
+        if self.probability_protocol.calibration == 'platt' and self.calibration is None:
+            raise ValueError('Missing fitted calibration')
+        self._validate_training_protocol(self.scientific_training_protocol)
+        metadata = dict(scientific_contract_version=3, model_version='ProEHN-round2',
+            feature_groups=self.feature_groups, preprocessor=self.preprocessor, model_config=self.model_config,
+            probability_protocol=asdict(self.probability_protocol),
+            calibration=asdict(self.calibration) if self.calibration is not None else None,
+            scientific_training_protocol=self.scientific_training_protocol)
+        Path(params_path).write_bytes(serialization.to_bytes(self.params))
+        Path(metadata_path).write_bytes(pickle.dumps(metadata))
 
     def _build_inputs(self, patient_data: Mapping[str, Any]) -> dict[str, jnp.ndarray]:
         if self.preprocessor is not None:

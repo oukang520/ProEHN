@@ -1,5 +1,5 @@
 """Versioned scientific topology artifacts; runtime options cannot change semantics."""
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field, fields
 import json
 import numpy as np
 from .features import FoldPreprocessor, TopologyCovariateSchema
@@ -18,11 +18,15 @@ class ScientificArtifactMetadata:
     regularization: dict
     target_event_schema_version: str
     training_feature_provenance_version: str
+    training_protocol: dict = field(default_factory=dict)
     scientific_contract_version: int = 3
     model_version: str = 'ProEHN-round2'
+    numerical_precision: str = 'float64'
     observation_semantics_version: str = OBSERVATION_SEMANTICS_VERSION
 
     def validate(self):
+        if self.numerical_precision != 'float64':
+            raise ValueError('Unsupported scientific precision')
         if self.scientific_contract_version != 3 or self.observation_semantics_version != OBSERVATION_SEMANTICS_VERSION:
             raise ValueError('Unsupported scientific/observation contract')
         if not self.model_version or not self.target_event_schema_version or not self.training_feature_provenance_version:
@@ -51,10 +55,16 @@ def save_topology_artifact(path, params, metadata):
 
 
 def load_topology_artifact(path, **runtime):
+    import jax
+    if not jax.config.jax_enable_x64:
+        raise ValueError('Formal topology inference requires JAX_ENABLE_X64=1')
     with np.load(path, allow_pickle=False) as data:
         if 'scientific_metadata_json' not in data:
             raise ValueError('Formal artifact lacks scientific contract; legacy migration requires verified provenance')
-        meta = ScientificArtifactMetadata(**json.loads(str(data['scientific_metadata_json'].item()))).validate()
+        raw_metadata = json.loads(str(data['scientific_metadata_json'].item()))
+        if set(raw_metadata) != {item.name for item in fields(ScientificArtifactMetadata)}:
+            raise ValueError('Incomplete or unsupported scientific artifact schema')
+        meta = ScientificArtifactMetadata(**raw_metadata).validate()
         params = np.asarray(data['params'], float)
     saved = dict(meta.regularization, log_rate_clip_min=meta.log_rate_clip_min, log_rate_clip_max=meta.log_rate_clip_max)
     for key, value in runtime.items():
