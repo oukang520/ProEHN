@@ -1,0 +1,24 @@
+# Protocol template: availability must be verified before freezing.
+cohort: MELA
+configuration_source: prespecified
+covariate_protocol:
+  frozen: false
+  schema_id: null
+  version: '1'
+  topology: [Age_at_Diagnosis, nMut_Primary, nMut_Metastatic, CNA_Primary, CNA_Metastatic, VAF_mean_Primary, VAF_mean_Metastatic]
+  kinetic: [Age_at_Diagnosis, nMut_Primary, nMut_Metastatic, CNA_Primary, CNA_Metastatic, VAF_mean_Primary, VAF_mean_Metastatic]
+kinetic_probability:
+  focal_gamma: 0.0
+  calibration: none
+label_protocol:
+  frozen: false
+  schema_id: null
+  version: null
+  source_variables: null
+  durable_threshold_days: null
+  response_mapping: null
+  time_unit: days
+readiness:
+  - REQUIRES_PROTOCOL_FREEZE_BEFORE_RERUN
+  - RAW_COVARIATE_AVAILABILITY_REQUIRES_VERIFICATION
+  - TMB_REQUIRES_REPROCESSING

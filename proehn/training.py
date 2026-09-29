@@ -179,7 +179,7 @@ def fit_kinetic_model(training_df, validation_df, *, patient_id_column,
     train_ids, val_ids = training_df[patient_id_column], validation_df[patient_id_column]
     if train_ids.isna().any() or val_ids.isna().any() or set(train_ids) & set(val_ids):
         raise ValueError('Known, disjoint training and inner-validation patients required')
-    prep = KineticPreprocessor().fit(training_df)
+    prep = KineticPreprocessor(config.get('covariates')).fit(training_df)
     xt, yt, _ = build_kinetic_matrices(training_df, label_column, preprocessor=prep)
     xv, yv, _ = build_kinetic_matrices(validation_df, label_column, preprocessor=prep)
     if not np.isin(yt, [0, 1]).any() or not np.isin(yv, [0, 1]).any():

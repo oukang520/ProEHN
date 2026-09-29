@@ -249,3 +249,26 @@ def validate_genomic_summary_units(frame, *, require_provenance=True):
         canonical.validate(values, unit=canonical.raw_unit)
         if base in ('nMut', 'CNA') and np.any(values != np.floor(values)):
             raise ValueError(f'{column}: raw locus counts must be integral')
+
+
+@dataclass(frozen=True)
+class FrozenCovariateProtocol:
+    cohort: str
+    schema_id: str
+    topology: tuple[str, ...]
+    kinetic: tuple[str, ...]
+    frozen: bool = False
+    version: str = '1'
+
+    def validate(self, frame=None):
+        if not self.frozen or not self.schema_id or not self.cohort or not self.version:
+            raise ValueError('REQUIRES_PROTOCOL_FREEZE_BEFORE_RERUN: verified cohort covariates required')
+        for columns in (self.topology, self.kinetic):
+            TopologyCovariateSchema(tuple(columns))
+            for compartment in ('Primary', 'Metastatic'):
+                for pair in (('nMut','TMB'), ('CNA','FGA')):
+                    if all(f'{name}_{compartment}' in columns for name in pair):
+                        raise ValueError('Duplicate burden representations require a separate scientific protocol')
+            if frame is not None and not set(columns) <= set(frame):
+                raise ValueError('Frozen cohort covariates unavailable; do not silently drop columns')
+        return self

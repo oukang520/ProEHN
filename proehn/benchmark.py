@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from .features import TargetMaskingProtocol, build_leave_target_out_features
+from .features import TargetMaskingProtocol, build_leave_target_out_features, FrozenCovariateProtocol, TopologyCovariateSchema
 from .preprocessing import TopologyTrainingPreprocessor, build_topology_training_data, GenePair
 from .training import fit_topology_model, fit_kinetic_model
 from .topology import ProEHNTopologyModel
@@ -124,6 +124,7 @@ class FormalProEHNTrainer:
     top_n_genes: int = 20
     kinetic_config: dict | None = None
     topology_config: dict | None = None
+    covariate_protocol: FrozenCovariateProtocol | None = None
 
     def fit(self, training, validation):
         require_frozen_label_protocol(self.label_schema)
@@ -132,13 +133,16 @@ class FormalProEHNTrainer:
             raise ValueError('Training/validation patients must be disjoint and known')
         train_features = self.spec.features(training)
         val_features = self.spec.features(validation)
+        if self.covariate_protocol is None or self.covariate_protocol.cohort != self.label_schema.cohort:
+            raise ValueError('Matching frozen cohort covariate protocol required')
+        self.covariate_protocol.validate(train_features).validate(val_features)
         for raw, features in ((training, train_features), (validation, val_features)):
             features[ids] = raw[ids].to_numpy()
             features[self.spec.stop_label_column] = build_progression_label(raw, self.label_schema)
         gate = fit_kinetic_model(train_features, val_features, patient_id_column=ids,
-                               label_column=self.spec.stop_label_column, model_config=self.kinetic_config)
+                               label_column=self.spec.stop_label_column, model_config=dict(self.kinetic_config or {}, covariates=self.covariate_protocol.kinetic))
         topology_data = self.spec.training_frame(training)
-        prep = TopologyTrainingPreprocessor(self.top_n_genes).fit(topology_data)
+        prep = TopologyTrainingPreprocessor(self.top_n_genes, schema=TopologyCovariateSchema(self.covariate_protocol.topology)).fit(topology_data)
         if self.spec.target_gene not in [g.name for g in prep.gene_pairs]:
             # A prespecified target is always retained; context ranking uses train only.
             prep.gene_pairs = prep.gene_pairs[:max(0, self.top_n_genes-1)] + [GenePair(

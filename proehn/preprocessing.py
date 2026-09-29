@@ -249,9 +249,17 @@ def generate_stop_label(patient_row, params, pt_driver_cols, mt_driver_cols):
 
 
 class KineticPreprocessor:
+    def __init__(self, covariates=None):
+        self.covariates = None if covariates is None else tuple(covariates)
+
     def fit(self, training_df):
         validate_genomic_summary_units(training_df)
-        self.feature_groups = split_kinetic_feature_columns(training_df.columns)
+        columns = training_df.columns
+        if self.covariates is not None:
+            if not set(self.covariates) <= set(columns):
+                raise ValueError('Frozen kinetic covariates unavailable')
+            columns = [c for c in columns if c in self.covariates or re.fullmatch(r'[PM]\.[A-Za-z0-9_-]+ \(M\)', c)]
+        self.feature_groups = split_kinetic_feature_columns(columns)
         self.transforms = {k: FoldPreprocessor(v).fit(training_df) for k, v in self.feature_groups.items()}
         return self
 

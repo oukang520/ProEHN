@@ -346,7 +346,7 @@ def test_formal_trainer_calls_formal_components_without_test_labels(monkeypatch)
     monkeypatch.setattr(benchmark, 'fit_kinetic_model', gate_fit)
     monkeypatch.setattr(benchmark, 'fit_topology_model', topology_fit)
     folds = patient_outer_folds(df.patient_id, n_splits=3)
-    results = run_oof_benchmark(df, df.patient_id, folds, {'ProEHN': lambda: FormalProEHNTrainer(spec, ProgressionLabelSchema('PACA', 'raw_pfs_days', 'raw_progression_event', 'days', 100., schema_id='synthetic', version='1', frozen=True))},
+    results = run_oof_benchmark(df, df.patient_id, folds, {'ProEHN': lambda: FormalProEHNTrainer(spec, ProgressionLabelSchema('PACA', 'raw_pfs_days', 'raw_progression_event', 'days', 100., schema_id='synthetic', version='1', frozen=True), covariate_protocol=__import__('proehn.features', fromlist=['FrozenCovariateProtocol']).FrozenCovariateProtocol('PACA', 'synthetic', (), (), True))},
                                target='A', test_feature_builder=spec.features)
     assert results[0].scores.shape == (12, 3)
     assert [s[0] for s in seen].count('kinetic') == 3
