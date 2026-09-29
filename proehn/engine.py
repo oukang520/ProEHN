@@ -13,7 +13,7 @@ from scipy.special import softmax
 from .kinetic import ProEHNKineticGatekeeper
 from .topology import ProEHNTopologyModel
 from .features import FoldPreprocessor
-from .representation import accessible_transition_log_rates
+from .representation import accessible_transition_log_rates, patient_transition_representation_observed, patient_transition_representation
 
 
 class ProEHNEngine:
@@ -126,8 +126,8 @@ class ProEHNEngine:
             raise ValueError("Seeding=0 conflicts with observed metastatic mutations")
 
         for gene in self.gene_names:
-            p_val = patient_data.get(f"P.{gene} (M)", patient_data.get(f"P.{gene}", 0))
-            m_val = patient_data.get(f"M.{gene} (M)", patient_data.get(f"M.{gene}", 0))
+            p_val = patient_data.get(f"P.{gene} (M)", patient_data.get(f"P.{gene}"))
+            m_val = patient_data.get(f"M.{gene} (M)", patient_data.get(f"M.{gene}"))
             if p_val not in (0, 1) or m_val not in (0, 1):
                 raise ValueError('Observed genomic indicators must be binary')
             pt_vec.append(p_val)
@@ -165,7 +165,7 @@ class ProEHNEngine:
         """
 
         conditional_mass = float(sum(row["topology_probability"] for row in rows))
-        integrated_mass = float(sum(row["absolute_risk"] for row in rows))
+        integrated_mass = float(sum(row["integrated_event_score"] for row in rows))
         max_conditional = float(max((row["topology_probability"] for row in rows), default=0.0))
         boundary_tolerance = 1e-12
         saturated = bool(
@@ -182,47 +182,52 @@ class ProEHNEngine:
             "boundary_tolerance": boundary_tolerance,
         }
 
-    def predict(self, patient_data: Mapping[str, Any]) -> dict[str, Any]:
-        """Return observation-time gate and conditional probabilities / integrated scores."""
+    def _representation(self, patient_data, *, covariates=None):
+        if not self.topology_ready:
+            raise RuntimeError('Fitted topology components required')
+        z = self._feature_vector(patient_data if covariates is None else covariates)
+        if 'observation_type' not in patient_data:
+            if patient_data.get('joint_snapshot') != 1:
+                raise ValueError('Explicit observation_type or joint_snapshot=1 is required')
+            pt, mt, seed = self._genotype_vectors(patient_data)
+            return patient_transition_representation(self.topology_model, self.topology_params, z,
+                self.gene_names, pt, mt, seed)
+        kind = int(patient_data['observation_type'])
+        def genotype(prefix):
+            return [patient_data.get(f'{prefix}.{g} (M)', patient_data.get(f'{prefix}.{g}')) for g in self.gene_names]
+        seed = patient_data.get('observed_seeding', patient_data.get('Seeding'))
+        if seed is not None and (seed not in (0, 1) or (kind != 4 and seed != (0 if kind == 0 else 1))):
+            raise ValueError('Seeding annotation conflicts with observation type')
+        return patient_transition_representation_observed(self.topology_model, self.topology_params, z,
+            self.gene_names, genotype('P') if kind != 2 else None,
+            genotype('M') if kind in (2, 3) else None, kind,
+            diagnosis_order=patient_data.get('diag_order'),
+            first_seeding=patient_data.get('seeding_at_first_observation', -1),
+            joint_snapshot=patient_data.get('joint_snapshot', False))
 
-        self._genotype_vectors(patient_data)
-        prob_go = self.kinetic.predict_go_probability(patient_data)
-        if not np.isfinite(prob_go) or not 0 <= prob_go <= 1:
-            raise ValueError("Invalid progression propensity")
-        prob_stop = 1.0 - prob_go
-        rates = self._transition_log_rates(patient_data)
-        probabilities = softmax([item["log_rate"] for item in rates]) if rates else []
-        absolute_risks = [
-            { "compartment":item["compartment"], "event":item["event"], "rate":float(np.exp(item["log_rate"])), "topology_probability": float(probability),
-             "integrated_event_score": float(probability * prob_go), "absolute_risk": float(probability * prob_go)}
-            for item, probability in zip(rates, probabilities)
-        ]
-        absolute_risks.sort(key=lambda item: item["absolute_risk"], reverse=True)
-        return {
-            "prob_go": prob_go,
-            "prob_stop": prob_stop,
-            "operational_stop_predicted": prob_stop > self.stop_threshold,
-            "is_stable_predicted": prob_stop > self.stop_threshold,
-            "score_semantics": "integrated ranking score; absolute_risk/is_stable_predicted are deprecated aliases, not absolute future risk/biological stasis",
-            "has_metastasis": self._genotype_vectors(patient_data)[2],
-            "absolute_risks": absolute_risks,
-            "probability_diagnostics": self._probability_diagnostics(prob_go, absolute_risks),
-        }
+    def _result(self, representation, prob_go):
+        integrated = representation.integrated_scores(prob_go)
+        rows = [dict(compartment=key[0], event=key[1], topology_probability=float(p),
+                     integrated_event_score=float(score))
+                for key, p, score in zip(representation.accessible_events,
+                    representation.conditional_probabilities, integrated)]
+        rows.sort(key=lambda row: row['integrated_event_score'], reverse=True)
+        diagnostics = self._probability_diagnostics(prob_go, rows)
+        diagnostics['calibration'] = self.kinetic.probability_protocol.calibration
+        return dict(prob_go=float(prob_go), prob_stop=float(1-prob_go),
+            operational_stop_predicted=bool(1-prob_go > self.stop_threshold),
+            integrated_event_scores=rows, probability_diagnostics=diagnostics,
+            representation_kind=getattr(representation, 'representation_kind', 'fully_observed'),
+            terminal_probability=getattr(representation, 'terminal_probability', float(not rows)),
+            score_semantics='P(Go) times posterior-averaged conditional transition direction; no time horizon')
+
+    def predict(self, patient_data: Mapping[str, Any]) -> dict[str, Any]:
+        representation = self._representation(patient_data)
+        return self._result(representation, self.kinetic.predict_go_probability(patient_data))
 
     def predict_topology(self, state, observed_patient, prob_go):
-        """Evaluate hypothetical state with the original covariate vector."""
-        original = self._feature_vector
-        # Use a separate shallow engine view so no shared instance is mutated.
-        import copy
-        view = copy.copy(self)
-        view._feature_vector = lambda _: original(observed_patient)
-        rates = view._transition_log_rates(state)
-        probabilities = softmax([r["log_rate"] for r in rates]) if rates else []
-        rows = [{"compartment":r["compartment"], "event":r["event"], "rate":float(np.exp(r["log_rate"])), "topology_probability":float(p), "integrated_event_score":float(p*prob_go), "absolute_risk":float(p*prob_go)}
-                for r,p in zip(rates,probabilities)]
-        rows.sort(key=lambda r:r['topology_probability'],reverse=True)
-        return {'prob_go':prob_go,'prob_stop':1-prob_go,'absolute_risks':rows,
-                'probability_diagnostics':self._probability_diagnostics(prob_go, rows)}
+        """Evaluate hypothetical state at the original observation-time covariates."""
+        return self._result(self._representation(state, covariates=observed_patient), prob_go)
 
     def transition_rates(self, patient_data):
         return [{"compartment":r["compartment"],"event":r["event"],"rate":float(np.exp(r["log_rate"]))}
