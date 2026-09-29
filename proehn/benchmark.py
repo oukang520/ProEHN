@@ -13,7 +13,8 @@ from .training import fit_topology_model, fit_kinetic_model
 from .topology import ProEHNTopologyModel
 from .kinetic import ProEHNKineticGatekeeper
 from .labels import ProgressionLabelSchema, build_progression_label, require_frozen_label_protocol
-from .representation import patient_transition_representation
+from .representation import patient_transition_representation_observed
+from .observations import observation_types
 
 
 @dataclass(frozen=True)
@@ -50,8 +51,10 @@ class TargetRecoverySpec:
         # Rebuild from closed provenance; never copy arbitrary dataframe columns.
         out = pd.DataFrame(index=raw.index)
         metadata = {}
+        kinds = observation_types(raw)
         for protocol in self.masking_protocols:
-            part = build_leave_target_out_features(raw, protocol)
+            observed = np.isin(kinds, [0, 1, 3, 4] if protocol.compartment == 'Primary' else [2, 3])
+            part = build_leave_target_out_features(raw.loc[observed], protocol).reindex(raw.index)
             metadata.update(part.attrs['feature_metadata'])
             for name in part:
                 if name in out and not out[name].equals(part[name]):
@@ -63,18 +66,26 @@ class TargetRecoverySpec:
         allowed |= {f'{f}_{p.compartment}' for p in self.masking_protocols for f in ('nMut', 'VAF_mean', 'CNA')}
         out = out[[c for c in out if c in allowed]]
         for name, loci in self.event_loci:
-            out[name] = 0 if name in target_columns else raw[list(loci)].max(axis=1)
-        # Seeding must be independently observed, never inferred from Stop/Go.
-        if 'observed_seeding' not in raw or not np.isin(raw['observed_seeding'], [0, 1]).all():
-            raise ValueError('Target recovery needs independently observed seeding; latent-state recovery protocol unresolved')
-        out['Seeding'] = raw['observed_seeding'].to_numpy()
+            present = kinds != 2 if name.startswith('P.') else np.isin(kinds, [2, 3])
+            out[name] = 0 if name in target_columns else raw[list(loci)].max(axis=1, skipna=False).where(present)
+        out['observation_type'] = kinds
+        if 'observed_seeding' in raw:
+            seed = raw['observed_seeding'].to_numpy()
+            for i, kind in enumerate(kinds):
+                if not pd.isna(seed[i]) and (seed[i] not in (0, 1) or (kind != 4 and seed[i] != (0 if kind == 0 else 1))):
+                    raise ValueError('Observation type conflicts with independent seeding annotation')
+                if kind == 4 and not pd.isna(seed[i]):
+                    raise ValueError('Known seeding requires the corresponding explicit observation type')
+        for name in ('diag_order', 'seeding_at_first_observation', 'joint_snapshot'):
+            if name in raw:
+                out[name] = raw[name].to_numpy()
         out.attrs['feature_metadata'] = metadata
         return out
 
     def training_frame(self, raw):
         out = self.features(raw)
         for name, loci in self.event_loci:
-            out[name] = raw[list(loci)].max(axis=1)
+            out[name] = raw[list(loci)].max(axis=1, skipna=False)
         for name in ('observation_type', 'type', 'diag_order', 'seeding_at_first_observation'):
             if name in raw:
                 out[name] = raw[name].to_numpy()
@@ -106,9 +117,13 @@ class FormalProEHNPredictor:
         out = []
         for i, (_, row) in enumerate(features.iterrows()):
             go = self.kinetic.predict_go_probability(row.to_dict())
-            representation = patient_transition_representation(
+            kind = int(row['observation_type'])
+            representation = patient_transition_representation_observed(
                 self.topology, self.topology_params, np.r_[1., z[i]], genes,
-                [row[g.primary] for g in pairs], [row[g.metastasis] for g in pairs], row['Seeding'])
+                [row[g.primary] for g in pairs] if kind != 2 else None,
+                [row[g.metastasis] for g in pairs] if kind in (2, 3) else None, kind,
+                diagnosis_order=row.get('diag_order'), first_seeding=row.get('seeding_at_first_observation', -1),
+                joint_snapshot=bool(row.get('joint_snapshot', False)))
             key = (self.spec.compartment, self.spec.target_gene)
             if key not in representation.accessible_events:
                 raise ValueError('Target must be accessible for every evaluation patient')
