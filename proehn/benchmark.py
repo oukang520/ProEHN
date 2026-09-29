@@ -12,7 +12,7 @@ from .preprocessing import TopologyTrainingPreprocessor, build_topology_training
 from .training import fit_topology_model, fit_kinetic_model
 from .topology import ProEHNTopologyModel
 from .kinetic import ProEHNKineticGatekeeper
-from .labels import ProgressionLabelSchema, build_progression_label
+from .labels import ProgressionLabelSchema, build_progression_label, require_frozen_label_protocol
 from .representation import patient_transition_representation
 
 
@@ -126,6 +126,7 @@ class FormalProEHNTrainer:
     topology_config: dict | None = None
 
     def fit(self, training, validation):
+        require_frozen_label_protocol(self.label_schema)
         ids = self.spec.patient_id_column
         if training[ids].isna().any() or validation[ids].isna().any() or set(training[ids]) & set(validation[ids]):
             raise ValueError('Training/validation patients must be disjoint and known')

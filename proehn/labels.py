@@ -20,6 +20,9 @@ class ProgressionLabelSchema:
     # Empty by default: RECIST mapping and treatment setting require a protocol.
     response_mapping: tuple[tuple[str, int], ...] = ()
     time_transformation: str = 'none'
+    schema_id: str = ''
+    version: str = ''
+    frozen: bool = False
 
     def __post_init__(self):
         if self.time_unit != 'days' or self.time_transformation != 'none':
@@ -73,3 +76,28 @@ def build_mela_progression_label(frame, schema):
 
 def build_lc_progression_label(frame, schema):
     return _cohort(frame, schema, 'LC')
+
+
+def require_frozen_label_protocol(schema):
+    if not schema.frozen or not schema.schema_id or not schema.version:
+        raise ValueError('REQUIRES_PROTOCOL_FREEZE_BEFORE_RERUN: frozen cohort label schema id/version required')
+    return schema
+
+
+def precomputed_progression_labels(frame, column, schema):
+    """Accept cached labels only with an exact, frozen clinical source contract."""
+    require_frozen_label_protocol(schema)
+    expected = label_provenance(schema)
+    if frame.attrs.get('label_provenance', {}).get(column) != expected:
+        raise ValueError('Precomputed label lacks matching frozen provenance')
+    values = frame[column].to_numpy()
+    if not np.isin(values, [-1, 0, 1]).all():
+        raise ValueError('Invalid operational labels')
+    return values
+
+
+def label_provenance(schema):
+    return dict(schema_id=schema.schema_id, version=schema.version, cohort=schema.cohort,
+        source_variables=[schema.pfs_column, schema.event_column] + ([schema.response_column] if schema.response_column else []),
+        threshold=schema.durable_threshold_days, unit=schema.time_unit,
+        response_mapping=[list(x) for x in schema.response_mapping], time_transformation=schema.time_transformation)
