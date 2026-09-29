@@ -213,3 +213,16 @@ def fit_kinetic_model(training_df, validation_df, *, patient_id_column,
     gate.params, gate.preprocessor, gate.feature_groups = best_params, prep, prep.feature_groups
     gate.ready = True
     return gate
+
+
+
+def train_kinetic_from_csv(*args, **kwargs):
+    """Retired single-table entry point that split after preprocessing.
+
+    Use fit_kinetic_model(training_df, validation_df, patient_id_column=...) with
+    raw patient-disjoint partitions and an explicit clinical label protocol.
+    """
+    raise ValueError(
+        'Single-table kinetic training is disabled: split raw patients before '
+        'preprocessing and call fit_kinetic_model with training/validation frames.'
+    )

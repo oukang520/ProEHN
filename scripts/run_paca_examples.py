@@ -8,27 +8,77 @@ from pathlib import Path
 import pandas as pd
 
 from proehn.paca_experiments import PACAExampleExperiments
+from proehn.paca_proehn_metrics import DEFAULT_PACA_PROEHN_TARGETS, run_paca_proehn_metrics
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run PACA example experiments for Fig.2A, Fig.3A-D and Fig.5B-C as pure tabular outputs."
+        description="Run PACA example experiments as pure tabular outputs."
     )
-    parser.add_argument("--topology-model", default="artifacts/proehn_topology_paca.npz", help="PACA topology .npz artifact.")
+    parser.add_argument(
+        "--topology-model",
+        default="artifacts/proehn_topology_paca.npz",
+        help="PACA topology .npz artifact.",
+    )
     parser.add_argument("--topology-data", required=True, help="PACA topology/trajectory feature CSV.")
-    parser.add_argument("--kinetic-params", default="artifacts/proehn_kinetic_paca.msgpack", help="PACA gatekeeper parameter file.")
-    parser.add_argument("--kinetic-metadata", default="artifacts/proehn_kinetic_paca_metadata.pkl", help="PACA gatekeeper metadata pickle.")
+    parser.add_argument(
+        "--kinetic-params",
+        default="artifacts/proehn_kinetic_paca.msgpack",
+        help="PACA gatekeeper parameter file.",
+    )
+    parser.add_argument(
+        "--kinetic-metadata",
+        default="artifacts/proehn_kinetic_paca_metadata.pkl",
+        help="PACA gatekeeper metadata pickle.",
+    )
     parser.add_argument("--kinetic-data", default=None, help="PACA gatekeeper/survival feature CSV for Fig.2A.")
     parser.add_argument(
         "--experiments",
         nargs="+",
         default=["fig2a", "fig3", "fig5"],
-        choices=["fig2a", "fig3", "fig5", "all"],
+        choices=["fig2a", "fig3", "fig5", "ablation", "proehn_metrics", "all"],
         help="Experiments to run.",
     )
     parser.add_argument("--out-dir", default=None, help="Optional directory for CSV outputs.")
     parser.add_argument("--preview-rows", type=int, default=12, help="Rows shown in terminal previews.")
     parser.add_argument("--grid-size", type=int, default=31, help="Grid size for Fig.3A surface data.")
+    parser.add_argument("--n-sim", type=int, default=1000, help="Simulation size for PACA ablation Top-k accuracy.")
+    parser.add_argument(
+        "--proehn-targets",
+        nargs="+",
+        default=None,
+        help="Primary mutation targets for PACA ProEHN metrics.",
+    )
+    parser.add_argument(
+        "--proehn-context-genes",
+        type=int,
+        default=9,
+        help="Number of context genes per ProEHN target.",
+    )
+    parser.add_argument(
+        "--proehn-cv-folds",
+        type=int,
+        default=5,
+        help="Cross-validation folds for PACA ProEHN metrics.",
+    )
+    parser.add_argument(
+        "--proehn-maxit",
+        type=int,
+        default=5000,
+        help="Maximum BFGS iterations for topology fitting.",
+    )
+    parser.add_argument(
+        "--proehn-vaf-threshold",
+        type=float,
+        default=0.5,
+        help="Fixed VAF threshold for the ProEHN gate.",
+    )
+    parser.add_argument(
+        "--proehn-nmut-threshold",
+        type=float,
+        default=20.0,
+        help="Fixed nMut threshold for the ProEHN gate.",
+    )
     return parser.parse_args()
 
 
@@ -55,27 +105,52 @@ def save_tables(tables: dict[str, pd.DataFrame], out_dir: str | Path | None) -> 
 
 def main() -> None:
     args = parse_args()
+    raise RuntimeError(
+        'Legacy in-sample PACA evaluation is disabled. Use FormalProEHNTrainer '
+        'with TargetRecoverySpec and run_oof_benchmark. No cohort file was read.'
+    )
     selected = set(args.experiments)
     if "all" in selected:
-        selected = {"fig2a", "fig3", "fig5"}
+        selected = {"fig2a", "fig3", "fig5", "ablation", "proehn_metrics"}
 
-    runner = PACAExampleExperiments(
-        topology_model_path=args.topology_model,
-        topology_data_path=args.topology_data,
-        kinetic_params_path=args.kinetic_params,
-        kinetic_metadata_path=args.kinetic_metadata,
-        kinetic_data_path=args.kinetic_data,
-    )
+    runner = None
+    if selected & {"fig2a", "fig3", "fig5", "ablation"}:
+        runner = PACAExampleExperiments(
+            topology_model_path=args.topology_model,
+            topology_data_path=args.topology_data,
+            kinetic_params_path=args.kinetic_params,
+            kinetic_metadata_path=args.kinetic_metadata,
+            kinetic_data_path=args.kinetic_data,
+        )
 
     all_tables: dict[str, pd.DataFrame] = {}
     if "fig2a" in selected:
+        assert runner is not None
         tables = runner.fig2a_kinetic_gatekeeper()
         all_tables.update(tables)
     if "fig3" in selected:
+        assert runner is not None
         tables = runner.fig3_host_modulation(grid_size=args.grid_size)
         all_tables.update(tables)
     if "fig5" in selected:
+        assert runner is not None
         tables = runner.fig5_trajectories()
+        all_tables.update(tables)
+    if "ablation" in selected:
+        assert runner is not None
+        tables = runner.ablation_full_vs_evolution(n_sim=args.n_sim)
+        all_tables.update(tables)
+    if "proehn_metrics" in selected:
+        targets = args.proehn_targets if args.proehn_targets is not None else DEFAULT_PACA_PROEHN_TARGETS
+        tables = run_paca_proehn_metrics(
+            pd.read_csv(args.topology_data),
+            targets=targets,
+            n_context_genes=args.proehn_context_genes,
+            n_splits=args.proehn_cv_folds,
+            mhn_maxit=args.proehn_maxit,
+            vaf_threshold=args.proehn_vaf_threshold,
+            nmut_threshold=args.proehn_nmut_threshold,
+        )
         all_tables.update(tables)
 
     save_tables(all_tables, args.out_dir)

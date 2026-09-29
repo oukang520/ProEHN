@@ -1,120 +1,41 @@
 # ProEHN
 
 ProEHN is a context-aware evolutionary hazard network for cancer progression.
-The released code keeps the core method only: the kinetic gatekeeper, the
-feature-modulated topology engine, and the final next-event synthesis layer.
-Exploratory validation scripts, figure-generation code and intermediate plots are
-intentionally excluded from this cleaned research-code release.
 
-## Method Summary
+## Web application
 
-For patient `i`, ProEHN uses a bipartite genotype state
-`x_i in {0,1}^{2n+1}`. The first `n` bits represent primary-tumor events, the
-next `n` bits represent metastatic events, and the final bit represents
-metastatic seeding.
+The research web interface is available at **[https://47.239.63.248/](https://47.239.63.248/)**.
 
-The framework has three stages:
+## Model core
 
-1. `K`: a kinetic gatekeeper estimates `P(Stop | x_i, z_i)`. The progression
-   probability is `P(Go) = 1 - P(Stop)`.
-2. `T`: a feature-modulated CTMC constructs a patient-specific transition matrix
-   through `theta_i[j,l] = sum_k z_i[k] * W_theta[k,j,l]`.
-3. Final synthesis converts relative topology hazards into absolute next-event
-   risk:
+ProEHN combines three components:
 
-```text
-P(next=e | x_i,z_i) = P(Go | x_i,z_i) * lambda_e(x_i,z_i) / sum_{a in A(x_i)} lambda_a(x_i,z_i)
-```
+- **Evolutionary kinetics (K):** estimates the probability of continued progression, `P(Go) = 1 - P(Stop)`, from the observed patient state and covariates.
+- **Evolutionary topology (T):** uses a covariate-modulated continuous-time Markov chain to model accessible primary-tumor, metastatic-tumor, and seeding transitions.
+- **Next-event synthesis:** scores each accessible event `e` as `P(Go) * lambda_e / sum_a lambda_a`, combining progression probability with the event's conditional topology probability.
 
-The code follows the current source implementation when manuscript wording and
-implementation details differ.
+## Runtime environment
 
-## Repository Layout
-
-```text
-ProEHN/
-  proehn/
-    kinetic.py        # Kinetic gatekeeper architecture and inference wrapper
-    topology.py       # Feature-modulated CTMC topology model
-    engine.py         # Unified ProEHN prediction API
-    preprocessing.py  # Gene-pair selection, labels and likelihood buckets
-    training.py       # Core topology training routine
-    ctmc/             # Kronecker-factorized CTMC likelihood kernels
-  configs/            # Default and cohort-specific parameters
-  scripts/            # Minimal command-line entry points
-  docs/               # Method and release notes
-  examples/           # Example patient JSON
-  tests/              # Lightweight API checks
-  artifacts/          # Expected location for trained weights
-```
-
-## Installation
+- Python 3.10+
+- JAX and JAXlib 0.4.20+
+- Flax 0.8+ and Optax 0.2+
+- NumPy 1.24+, pandas 2.0+, SciPy 1.10+, scikit-learn 1.3+, and PyYAML 6.0+
 
 ```bash
-cd ProEHN
 python -m pip install -e .
 ```
 
-JAX installation can be platform-specific. If GPU acceleration is required,
-install the matching `jaxlib` wheel following the official JAX instructions, then
-install this package in editable mode.
+## Datasets
 
-## Train the Topology Engine
+- **PACA-AU and MELA-AU:** [ICGC 25K legacy Release 28](https://docs.icgc-argo.org/docs/data-access/icgc-25k-data)
+- **LUAD:** [AACR Project GENIE 19.0-public access page](https://aacrprojectgenie.org/data/)
 
-```bash
-python scripts/train_topology.py \
-  --config configs/cohorts/paca.yaml \
-  --data path/to/cohort_feature_table.csv \
-  --out artifacts/proehn_topology_paca.npz
-```
+Patient-level source data are not redistributed in this repository. Access and use them under the source repositories' terms.
 
-The input table should contain paired mutation columns such as `P.KRAS (M)` and
-`M.KRAS (M)`, plus `Seeding`, `type`, and `diag_order` when available. Missing
-`type` and `diag_order` columns are filled with conservative defaults for paired
-samples.
-
-## Predict One Patient
+## Core commands
 
 ```bash
-python scripts/predict_patient.py \
-  --config configs/cohorts/paca.yaml \
-  --patient examples/patient_example.json \
-  --top-k 10
+python scripts/train_kinetic.py --config configs/cohorts/paca.yaml --data data.csv
+python scripts/train_topology.py --config configs/cohorts/paca.yaml --data data.csv
+python scripts/run_paca_examples.py --experiments proehn_metrics --topology-data examples/paca_processed_data.csv
 ```
-
-If kinetic artifacts are absent, the engine uses the source-code fallback
-`P(Go)=0.85`. If topology artifacts are absent, the output contains kinetic
-probabilities but no ranked next-event hazards.
-
-## PACA Example Experiments
-
-Pure-data example experiments for manuscript Fig.2A, Fig.3A-D and Fig.5B-C are
-available through:
-
-```bash
-python scripts/run_paca_examples.py \
-  --topology-model artifacts/proehn_topology_paca.npz \
-  --topology-data path/to/paca_topology_feature_table.csv \
-  --kinetic-data path/to/paca_gatekeeper_feature_table.csv \
-  --out-dir results/paca_examples
-```
-
-See [docs/PACA_EXAMPLE_EXPERIMENTS.md](docs/PACA_EXAMPLE_EXPERIMENTS.md) for
-the exact output tables and data requirements.
-
-## Artifact Convention
-
-Artifacts are configured in YAML:
-
-- `proehn_kinetic_<cohort>.msgpack`: Flax parameters for the gatekeeper.
-- `proehn_kinetic_<cohort>_metadata.pkl`: scalers, feature groups and model config.
-- `proehn_topology_<cohort>.npz`: CTMC parameters, selected gene names and feature names.
-
-## Tests
-
-```bash
-pytest
-```
-
-The included tests are intentionally lightweight so they can run before private
-cohort data and trained weights are available.
