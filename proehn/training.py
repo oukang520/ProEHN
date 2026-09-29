@@ -101,6 +101,9 @@ def train_topology_from_csv(
 ) -> dict[str, Any]:
     """Train and save a ProEHN topology artifact from a feature table."""
 
+    for required in ("target_event_schema_version", "training_feature_provenance_version"):
+        if not config.get("data", {}).get(required):
+            raise ValueError(f"Missing frozen artifact provenance: {required}")
     df = pd.read_csv(csv_path)
     data_cfg = config.get("data", {})
     df.attrs["feature_metadata"] = data_cfg.get("feature_metadata", {})
@@ -127,7 +130,7 @@ def train_topology_from_csv(
         metastasis_prefix=data_cfg.get("metastasis_prefix", "M."),
         mutation_suffix=data_cfg.get("mutation_suffix", " (M)"),
     )
-    _, params, final_loss = fit_topology_model(
+    model, params, final_loss = fit_topology_model(
         buckets,
         n_events,
         n_features,
@@ -142,16 +145,13 @@ def train_topology_from_csv(
     )
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(
-        output_path,
-        params=params,
-        gene_names=np.array(gene_names, dtype=object),
-        feature_names=np.array(feature_names, dtype=object),
-        final_loss=final_loss,
-        n_samples=n_samples,
-        preprocessing_json=json.dumps(preprocessor.covariates.metadata()),
-        scientific_contract_version=2,
-    )
+    from .artifacts import ScientificArtifactMetadata, save_topology_artifact
+    metadata = ScientificArtifactMetadata(tuple(gene_names), tuple(feature_names),
+        tuple(preprocessor.covariates.columns), preprocessor.covariates.metadata(),
+        model.log_rate_clip_min, model.log_rate_clip_max,
+        {k: getattr(model, k) for k in ('regularization_strength', 'l1_ratio', 'l2_floor')},
+        data_cfg['target_event_schema_version'], data_cfg['training_feature_provenance_version'])
+    save_topology_artifact(output_path, params, metadata)
     return {
         "output_path": str(output_path),
         "final_loss": final_loss,

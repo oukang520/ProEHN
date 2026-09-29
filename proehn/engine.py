@@ -31,9 +31,9 @@ class ProEHNEngine:
         topology_model_path: str | Path | None = None,
         stop_threshold: float = 0.90,
         fallback_go_probability: float = 0.85,
-        regularization_strength: float = 0.01,
-        log_rate_clip_min: float = -20.0,
-        log_rate_clip_max: float = 20.0,
+        regularization_strength: float | None = None,
+        log_rate_clip_min: float | None = None,
+        log_rate_clip_max: float | None = None,
         topology_preprocessing_path: str | Path | None = None,
     ) -> None:
         self.preprocessing = None
@@ -71,27 +71,16 @@ class ProEHNEngine:
         log_rate_clip_min: float,
         log_rate_clip_max: float,
     ) -> None:
-        data = np.load(topology_model_path, allow_pickle=True)
-        self.topology_params = jnp.array(data["params"])
-        if 'preprocessing_json' in data:
-            self.fold_preprocessor = FoldPreprocessor.from_metadata(json.loads(str(data['preprocessing_json'].item())))
-        self.gene_names = [str(x) for x in data["gene_names"].tolist()]
-        self.feature_names = [str(x) for x in data["feature_names"].tolist()]
-        self.topology_model = ProEHNTopologyModel(
-            n_events=len(self.gene_names),
-            n_features=len(self.feature_names),
-            regularization_strength=regularization_strength,
-            log_rate_clip_min=log_rate_clip_min,
-            log_rate_clip_max=log_rate_clip_max,
-        )
+        from .artifacts import load_topology_artifact
+        if self.preprocessing is not None:
+            raise ValueError('Formal inference uses embedded training preprocessing only')
+        self.topology_model, params, self.scientific_metadata, self.fold_preprocessor = load_topology_artifact(
+            topology_model_path, regularization_strength=regularization_strength,
+            log_rate_clip_min=log_rate_clip_min, log_rate_clip_max=log_rate_clip_max)
+        self.topology_params = jnp.asarray(params)
+        self.gene_names = list(self.scientific_metadata.gene_names)
+        self.feature_names = list(self.scientific_metadata.feature_names)
         self.W_theta, self.W_dp, self.W_dm = self.topology_model.parse_params(self.topology_params)
-        if self.preprocessing:
-            if self.preprocessing['artifact_features'] != self.feature_names:
-                raise ValueError('Topology preprocessing feature order mismatch')
-            mean=np.asarray(self.preprocessing['mean'],dtype=np.float64)
-            scale=np.asarray(self.preprocessing['scale'],dtype=np.float64)
-            if mean.shape != (len(self.feature_names),) or scale.shape != mean.shape or not np.isfinite(mean).all() or not np.isfinite(scale).all() or np.any(scale<=0):
-                raise ValueError('Invalid topology preprocessing statistics')
         self.topology_ready = True
 
     def _feature_vector(self, patient_data: Mapping[str, Any]) -> jnp.ndarray:
