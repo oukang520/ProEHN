@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
+import json
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -12,7 +13,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
-from .preprocessing import build_topology_training_data, calculate_marginal_rates
+from .preprocessing import build_topology_training_data, calculate_marginal_rates, TopologyTrainingPreprocessor
 from .topology import ProEHNTopologyModel
 
 
@@ -27,14 +28,20 @@ def fit_topology_model(
     log_rate_clip_max: float = 20.0,
     optimizer_maxiter: int = 500,
     random_seed: int = 42,
+    l2_floor: float = 0.0,
 ) -> tuple[ProEHNTopologyModel, np.ndarray, float]:
     """Fit the feature-modulated CTMC topology engine with L-BFGS-B."""
 
+    if not jax.config.x64_enabled:
+        raise RuntimeError('Enable JAX_ENABLE_X64=1 before topology fitting; float64 likelihoods are required')
+    if not buckets or n_samples != sum(len(b[3]) for b in buckets):
+        raise ValueError('Likelihood normalization must equal included observations')
     model = ProEHNTopologyModel(
         n_events=n_events,
         n_features=n_features,
         regularization_strength=regularization_strength,
         l1_ratio=l1_ratio,
+        l2_floor=l2_floor,
         log_rate_clip_min=log_rate_clip_min,
         log_rate_clip_max=log_rate_clip_max,
     )
@@ -65,8 +72,8 @@ def fit_topology_model(
         total_grad = jnp.zeros_like(params)
         for bucket in buckets_jax:
             loss, grad = bucket_loss_and_grad(params, *bucket)
-            if jnp.isnan(loss) or jnp.any(jnp.isnan(grad)):
-                total_loss += 1e6
+            if not jnp.isfinite(loss) or not jnp.all(jnp.isfinite(grad)):
+                raise FloatingPointError("Non-finite likelihood/gradient; optimization aborted")
             else:
                 total_loss += loss
                 total_grad += grad
@@ -82,6 +89,8 @@ def fit_topology_model(
         jac=True,
         options={"maxiter": int(optimizer_maxiter), "disp": False},
     )
+    if not result.success or not np.isfinite(result.fun):
+        raise RuntimeError(f"Topology optimizer did not converge: {result.message}")
     return model, np.asarray(result.x, dtype=np.float64), float(result.fun)
 
 
@@ -94,9 +103,18 @@ def train_topology_from_csv(
 
     df = pd.read_csv(csv_path)
     data_cfg = config.get("data", {})
+    df.attrs["feature_metadata"] = data_cfg.get("feature_metadata", {})
     topo_cfg = config.get("topology", {})
+    from .features import TopologyCovariateSchema
+    preprocessor = TopologyTrainingPreprocessor(
+        int(topo_cfg.get('top_n_genes', 20)), topo_cfg.get('core_drivers', ()),
+        TopologyCovariateSchema(tuple(topo_cfg['covariates'])) if 'covariates' in topo_cfg else None,
+        data_cfg.get('primary_prefix', 'P.'), data_cfg.get('metastasis_prefix', 'M.'),
+        data_cfg.get('mutation_suffix', ' (M)'),
+    ).fit(df)
     buckets, n_events, n_features, n_samples, gene_names, feature_names = build_topology_training_data(
         df,
+        preprocessor=preprocessor,
         top_n_genes=int(topo_cfg.get("top_n_genes", 20)),
         max_batch_size=int(topo_cfg.get("max_batch_size", 1)),
         max_active_events=int(topo_cfg.get("max_active_events", 18)),
@@ -116,6 +134,7 @@ def train_topology_from_csv(
         n_samples,
         regularization_strength=float(topo_cfg.get("regularization_strength", 0.01)),
         l1_ratio=float(topo_cfg.get("l1_ratio", 1.0)),
+        l2_floor=float(topo_cfg.get("l2_floor", 0.0)),
         log_rate_clip_min=float(topo_cfg.get("log_rate_clip_min", -20.0)),
         log_rate_clip_max=float(topo_cfg.get("log_rate_clip_max", 20.0)),
         optimizer_maxiter=int(topo_cfg.get("optimizer_maxiter", 500)),
@@ -130,6 +149,8 @@ def train_topology_from_csv(
         feature_names=np.array(feature_names, dtype=object),
         final_loss=final_loss,
         n_samples=n_samples,
+        preprocessing_json=json.dumps(preprocessor.covariates.metadata()),
+        scientific_contract_version=2,
     )
     return {
         "output_path": str(output_path),
@@ -140,3 +161,55 @@ def train_topology_from_csv(
         "gene_names": gene_names,
         "feature_names": feature_names,
     }
+
+
+def fit_kinetic_model(training_df, validation_df, *, patient_id_column,
+                      label_column='Patient_Label', model_config=None):
+    """Train formal gatekeeper after splitting; early stopping sees inner val only.
+
+    This entry point has no test-data argument and writes no artifacts. It uses
+    the operational Stop=1 convention. Focal/weighted outputs require independent
+    calibration before an absolute-probability interpretation can be justified.
+    """
+    from .preprocessing import KineticPreprocessor, build_kinetic_matrices
+    from .kinetic import ProEHNKineticGatekeeper, create_train_state, kinetic_loss_fn
+    config = dict(model_config or {})
+    train_ids, val_ids = training_df[patient_id_column], validation_df[patient_id_column]
+    if train_ids.isna().any() or val_ids.isna().any() or set(train_ids) & set(val_ids):
+        raise ValueError('Known, disjoint training and inner-validation patients required')
+    prep = KineticPreprocessor().fit(training_df)
+    xt, yt, _ = build_kinetic_matrices(training_df, label_column, preprocessor=prep)
+    xv, yv, _ = build_kinetic_matrices(validation_df, label_column, preprocessor=prep)
+    if not np.isin(yt, [0, 1]).any() or not np.isin(yv, [0, 1]).any():
+        raise ValueError('Training and validation each require observed progression labels')
+    key = jax.random.PRNGKey(int(config.get('random_seed', 42)))
+    state = create_train_state(key, config, {k: v.shape[1] for k, v in xt.items()})
+    train_batch = dict(x={k: jnp.asarray(v) for k, v in xt.items()}, y=jnp.asarray(yt))
+    val_batch = dict(x={k: jnp.asarray(v) for k, v in xv.items()}, y=jnp.asarray(yv))
+    # BCE by default: a proper scoring rule; no outcome-dependent class weights.
+    gamma = float(config.get('focal_gamma', 0.))
+    best_loss, best_params, stale = np.inf, None, 0
+    for _ in range(int(config.get('num_epochs', 150))):
+        key, step_key = jax.random.split(key)
+        loss, grad = jax.value_and_grad(kinetic_loss_fn)(state.params, state, train_batch, step_key, 1., gamma)
+        if not np.isfinite(float(loss)):
+            raise FloatingPointError('Non-finite kinetic training loss')
+        state = state.apply_gradients(grads=grad)
+        metrics, _ = kinetic_loss_fn(state.params, state, val_batch, step_key, 1., gamma, train=False)
+        val_loss = float(metrics['loss'])
+        if not np.isfinite(val_loss):
+            raise FloatingPointError('Non-finite kinetic validation loss')
+        if val_loss < best_loss:
+            best_loss, best_params, stale = val_loss, state.params, 0
+        else:
+            stale += 1
+        if stale >= int(config.get('patience', 15)):
+            break
+    if best_params is None:
+        raise ValueError('num_epochs must be positive')
+    from .kinetic import KineticGatekeeperNetwork
+    gate = ProEHNKineticGatekeeper(None, None)
+    gate.model = KineticGatekeeperNetwork(int(config.get('d_model', 128)), int(config.get('n_head_layers', 2)), float(config.get('dropout_rate', .2)))
+    gate.params, gate.preprocessor, gate.feature_groups = best_params, prep, prep.feature_groups
+    gate.ready = True
+    return gate

@@ -16,7 +16,7 @@ class KineticConfig:
     d_model: int = 128
     n_head_layers: int = 2
     dropout_rate: float = 0.2
-    focal_gamma: float = 2.0
+    focal_gamma: float = 0.0
     learning_rate: float = 1e-4
     batch_size: int = 32
     num_epochs: int = 150
@@ -34,6 +34,7 @@ class TopologyConfig:
     max_active_events: int = 18
     regularization_strength: float = 0.01
     l1_ratio: float = 1.0
+    l2_floor: float = 0.0
     log_rate_clip_min: float = -20.0
     log_rate_clip_max: float = 20.0
     optimizer_maxiter: int = 500

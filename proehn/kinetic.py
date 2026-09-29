@@ -1,4 +1,4 @@
-"""Kinetic gatekeeper for evolutionary stasis versus active progression."""
+"""Kinetic gatekeeper for operational Stop versus Go progression propensity."""
 
 from __future__ import annotations
 
@@ -175,6 +175,7 @@ class ProEHNKineticGatekeeper:
         self.metadata_path = Path(metadata_path) if metadata_path else None
         self.fallback_go_probability = float(fallback_go_probability)
         self.ready = False
+        self.preprocessor = None
         self.model: KineticGatekeeperNetwork | None = None
         self.params: Any = None
         self.scalers: Mapping[str, Any] = {}
@@ -190,6 +191,7 @@ class ProEHNKineticGatekeeper:
 
         self.scalers = metadata.get("scalers", metadata.get("scaler", {}))
         self.feature_groups = metadata["feature_groups"]
+        self.preprocessor = metadata.get("preprocessor")
         self.model_config.update(metadata.get("model_config", {}))
         self.model = KineticGatekeeperNetwork(
             d_model=int(self.model_config.get("d_model", 128)),
@@ -202,6 +204,10 @@ class ProEHNKineticGatekeeper:
         self.ready = True
 
     def _build_inputs(self, patient_data: Mapping[str, Any]) -> dict[str, jnp.ndarray]:
+        if self.preprocessor is not None:
+            import pandas as pd
+            transformed = self.preprocessor.transform(pd.DataFrame([patient_data]))
+            return {k: jnp.asarray(v) for k, v in transformed.items()}
         inputs: dict[str, jnp.ndarray] = {}
         for group in ["pt_genomic", "mt_genomic"]:
             values = [float(patient_data.get(col, 0.0)) for col in self.feature_groups[group]]
@@ -216,10 +222,10 @@ class ProEHNKineticGatekeeper:
         return inputs
 
     def predict_stop_probability(self, patient_data: Mapping[str, Any]) -> float:
-        """Return P(Stop); falls back to source-code default when artifacts are absent."""
+        """Return operational P(Stop); missing fitted components are an error."""
 
         if not self.ready or self.model is None:
-            return 1.0 - self.fallback_go_probability
+            raise RuntimeError("Fitted kinetic components are required; fixed-probability surrogate is disabled")
 
         inputs = self._build_inputs(patient_data)
         logits = self.model.apply(

@@ -15,7 +15,7 @@ kinetic:
   d_model: 128
   n_head_layers: 2
   dropout_rate: 0.2
-  focal_gamma: 2.0
+  focal_gamma: 0.0
   learning_rate: 0.0001
   batch_size: 32
   num_epochs: 150
@@ -29,6 +29,7 @@ topology:
   max_active_events: 18
   regularization_strength: 0.01
   l1_ratio: 1.0
+  l2_floor: 0.0
   log_rate_clip_min: -20.0
   log_rate_clip_max: 20.0
   optimizer_maxiter: 500

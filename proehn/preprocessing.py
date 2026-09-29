@@ -9,7 +9,9 @@ from typing import Any, Iterable, Mapping
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+from .features import FoldPreprocessor, TopologyCovariateSchema, ALLOWED_COLUMNS, validate_genomic_summary_units
+from .observations import observation_types
+from .labels import build_progression_label
 
 
 DEFAULT_FORBIDDEN_FEATURES = {
@@ -78,27 +80,22 @@ def find_gene_pairs(
 
 
 def rank_gene_pairs(
-    df: pd.DataFrame,
+    training_df: pd.DataFrame,
     gene_pairs: Iterable[GenePair],
     seeding_column: str = "Seeding",
     core_drivers: Iterable[str] = (),
 ) -> list[GenePair]:
-    """Rank genes by core-driver priority, seeding relevance and mutation frequency."""
+    """Training-only prevalence, with exact matches to frozen external drivers.
 
-    core_drivers = tuple(core_drivers)
-    seeding = df[seeding_column].fillna(0).astype(int) if seeding_column in df.columns else pd.Series(0, index=df.index)
-    ranked: list[GenePair] = []
+    Seeding is deliberately unused: progression-derived seeding labels cannot
+    determine genomic context. Evaluation frames must never be passed here.
+    """
+    core = set(core_drivers)
+    ranked = []
     for pair in gene_pairs:
-        is_mutated = ((df[pair.primary].fillna(0) == 1) | (df[pair.metastasis].fillna(0) == 1)).astype(int)
-        frequency = float(is_mutated.sum())
-        if frequency > 0 and seeding.nunique() > 1 and is_mutated.std() > 1e-9:
-            corr = seeding.corr(is_mutated)
-            relevance = float(abs(corr)) if not np.isnan(corr) else 0.0
-        else:
-            relevance = 0.0
-        priority = 100.0 if any(driver in pair.name for driver in core_drivers) else 0.0
-        ranked.append(GenePair(pair.name, pair.primary, pair.metastasis, frequency, relevance, priority))
-    return sorted(ranked, key=lambda item: item.score, reverse=True)
+        frequency = float(((training_df[pair.primary] == 1) | (training_df[pair.metastasis] == 1)).sum())
+        ranked.append(GenePair(pair.name, pair.primary, pair.metastasis, frequency, 0., float(pair.name in core)))
+    return sorted(ranked, key=lambda p: (-p.priority, -p.frequency, p.name))
 
 
 def calculate_marginal_rates(buckets: list[tuple[int, int, int, np.ndarray, np.ndarray]], n_events: int) -> jnp.ndarray:
@@ -109,19 +106,14 @@ def calculate_marginal_rates(buckets: list[tuple[int, int, int, np.ndarray, np.n
     total_samples = 0
     for bucket_type, _, _, bucket_genes, _ in buckets:
         genes = np.asarray(bucket_genes)
-        batch_len = genes.shape[0]
-        total_samples += batch_len
-        if bucket_type == 1:
-            event_counts[:n_events] += (genes == 1).sum(axis=0)
-            event_counts[n_events] += batch_len
-        elif bucket_type == 2:
-            event_counts[:n_events] += (genes[:, :-1] == 1).sum(axis=0)
-            event_counts[n_events] += (genes[:, -1] == 1).sum(axis=0)
+        total_samples += len(genes)
+        if bucket_type in (0, 1, 2, 4):
+            event_counts[:n_events] += genes[:, :n_events].sum(axis=0)
+            if bucket_type in (1, 2):
+                event_counts[n_events] += len(genes)
         elif bucket_type == 3:
-            genes_only = genes[:, : 2 * n_events]
-            is_mutated = (genes_only[:, 0::2] + genes_only[:, 1::2]) > 0
-            event_counts[:n_events] += is_mutated.sum(axis=0)
-            event_counts[n_events] += batch_len
+            event_counts[:n_events] += ((genes[:, :2*n_events:2]+genes[:, 1:2*n_events:2]) > 0).sum(axis=0)
+            event_counts[n_events] += len(genes)
 
     freqs = np.clip(event_counts / (total_samples + 1e-9), 0.01, 0.99)
     return jnp.array(np.log(freqs / (1.0 - freqs)), dtype=jnp.float64)
@@ -132,245 +124,146 @@ def select_numeric_feature_columns(
     excluded_columns: Iterable[str],
     forbidden_features: Iterable[str] = DEFAULT_FORBIDDEN_FEATURES,
     use_bio_pure_features: bool = False,
+    schema: TopologyCovariateSchema | None = None,
 ) -> list[str]:
-    """Select non-leaking numeric covariates for topology modulation."""
-
-    excluded = set(excluded_columns)
-    forbidden = set(forbidden_features)
-    selected: list[str] = []
-    for col in df.columns:
-        col_lower = col.lower()
-        if col in excluded or col in forbidden:
-            continue
-        if col.startswith("P.") or col.startswith("M."):
-            continue
-        if any(token in col_lower for token in ["disease", "response", "label", "vital_status"]):
-            continue
-        if use_bio_pure_features and "_is_Missing" in col:
-            continue
-        numeric = pd.to_numeric(df[col], errors="coerce")
-        if numeric.notna().any():
-            selected.append(col)
-    return selected
+    """Closed observation-time whitelist, including a closed missingness schema."""
+    schema = schema or TopologyCovariateSchema()
+    excluded = set(excluded_columns) | set(forbidden_features)
+    return [c for c in schema.select(df) if c not in excluded]
 
 
-def standardize_features(df: pd.DataFrame, feature_columns: list[str], mean_impute: bool = False) -> tuple[np.ndarray, list[str]]:
-    """Return z-scored covariates without the intercept column."""
+def standardize_features(df, feature_columns, mean_impute=False, *, preprocessor=None):
+    """Transform only; callers must explicitly fit training preprocessing first."""
+    if preprocessor is None or list(preprocessor.columns) != list(feature_columns):
+        raise ValueError('Provide a matching training-fitted FoldPreprocessor')
+    return preprocessor.transform(df), preprocessor.feature_names
 
-    if not feature_columns:
-        return np.zeros((len(df), 1), dtype=np.float64), ["Dummy"]
-    features = df[feature_columns].apply(pd.to_numeric, errors="coerce")
-    features = features.fillna(features.mean()).fillna(0.0) if mean_impute else features.fillna(0.0)
-    values = features.to_numpy(dtype=np.float64)
-    mean = values.mean(axis=0)
-    std = values.std(axis=0)
-    std[std == 0] = 1.0
-    return (values - mean) / std, feature_columns
+
+class TopologyTrainingPreprocessor:
+    """Fit gene selection and covariates once on the training partition."""
+    def __init__(self, top_n_genes=20, core_drivers=(), schema=None,
+                 primary_prefix='P.', metastasis_prefix='M.', mutation_suffix=' (M)'):
+        self.top_n_genes = top_n_genes
+        self.core_drivers = core_drivers
+        self.schema = schema or TopologyCovariateSchema()
+        self.prefixes = (primary_prefix, metastasis_prefix, mutation_suffix)
+
+    def fit(self, training_df):
+        validate_genomic_summary_units(training_df)
+        if self.top_n_genes <= 0:
+            raise ValueError('top_n_genes must be positive')
+        self.gene_pairs = rank_gene_pairs(training_df, find_gene_pairs(training_df.columns, *self.prefixes), core_drivers=self.core_drivers)[:self.top_n_genes]
+        if not self.gene_pairs:
+            raise ValueError('No paired primary/metastatic genomic columns')
+        self.covariates = FoldPreprocessor(self.schema.select(training_df)).fit(training_df)
+        return self
+
+    def transform(self, frame):
+        validate_genomic_summary_units(frame, require_provenance=False)
+        return self.covariates.transform(frame)
 
 
 def build_topology_training_data(
-    df: pd.DataFrame,
-    top_n_genes: int = 20,
-    max_batch_size: int = 1,
-    max_active_events: int = 18,
-    core_drivers: Iterable[str] = (),
-    use_bio_pure_features: bool = False,
-    seeding_column: str = "Seeding",
-    type_column: str = "type",
-    diagnosis_order_column: str = "diag_order",
-    primary_prefix: str = "P.",
-    metastasis_prefix: str = "M.",
-    mutation_suffix: str = " (M)",
-) -> tuple[list[tuple[int, int, int, np.ndarray, np.ndarray]], int, int, int, list[str], list[str]]:
-    """Create homogeneous CTMC likelihood buckets from cross-sectional data."""
+    df: pd.DataFrame, top_n_genes=20, max_batch_size=1, max_active_events=18,
+    core_drivers=(), use_bio_pure_features=False, seeding_column='Seeding',
+    type_column='type', diagnosis_order_column='diag_order', primary_prefix='P.',
+    metastasis_prefix='M.', mutation_suffix=' (M)', *, preprocessor=None,
+    covariate_schema=None,
+):
+    """Build likelihood buckets from TRAINING rows; never silently drop cases.
 
-    if type_column not in df.columns:
-        df = df.copy()
-        df[type_column] = 3
-    if seeding_column not in df.columns:
-        df = df.copy()
-        df[seeding_column] = 0
-    if diagnosis_order_column not in df.columns:
-        df = df.copy()
-        df[diagnosis_order_column] = 1
-
-    gene_pairs = rank_gene_pairs(
-        df,
-        find_gene_pairs(df.columns, primary_prefix, metastasis_prefix, mutation_suffix),
-        seeding_column=seeding_column,
-        core_drivers=core_drivers,
-    )[:top_n_genes]
-    if not gene_pairs:
-        raise ValueError("No paired primary/metastatic mutation columns were found.")
-
-    selected_gene_cols = [col for pair in gene_pairs for col in (pair.primary, pair.metastasis)]
-    feature_cols = select_numeric_feature_columns(
-        df,
-        excluded_columns=selected_gene_cols,
-        use_bio_pure_features=use_bio_pure_features,
-    )
-    features_norm, feature_names = standardize_features(df, feature_cols, mean_impute=use_bio_pure_features)
-    features_with_bias = np.hstack([np.ones((len(df), 1), dtype=np.float64), features_norm])
-
-    gene_data = df[selected_gene_cols].apply(pd.to_numeric, errors="coerce").fillna(0).to_numpy(dtype=np.int8)
-    diag_orders = df[diagnosis_order_column].fillna(1).to_numpy(dtype=np.int8)
-    types = df[type_column].fillna(3).to_numpy(dtype=np.int8)
-    n_events = len(gene_pairs)
-    buckets: list[tuple[int, int, int, np.ndarray, np.ndarray]] = []
-    skipped = 0
-
-    def add_to_bucket(bucket_type: int, n_primary: int, n_metastatic: int, data: np.ndarray, feats: np.ndarray) -> None:
-        nonlocal skipped
-        if (n_primary + n_metastatic) > max_active_events:
-            skipped += len(data)
-            return
-        for start in range(0, data.shape[0], max_batch_size):
-            end = min(start + max_batch_size, data.shape[0])
-            buckets.append((bucket_type, int(n_primary), int(n_metastatic), data[start:end], feats[start:end]))
-
-    if np.any(types == 1):
-        mask = types == 1
-        sub_g = gene_data[mask]
-        sub_f = features_with_bias[mask]
-        n_p = (sub_g[:, 0::2] == 1).sum(axis=1)
-        for n in np.unique(n_p):
-            if n > 0:
-                add_to_bucket(1, int(n), 0, sub_g[n_p == n][:, 0::2], sub_f[n_p == n])
-
-    if np.any(types == 2):
-        mask = types == 2
-        sub_g = gene_data[mask]
-        sub_f = features_with_bias[mask]
-        mt_full = np.column_stack([sub_g[:, 1::2], np.ones(mask.sum(), dtype=np.int8)])
-        n_m = (mt_full == 1).sum(axis=1)
-        for n in np.unique(n_m):
-            add_to_bucket(2, 0, int(n), mt_full[n_m == n], sub_f[n_m == n])
-
-    if np.any(types == 3):
-        mask = types == 3
-        sub_g = gene_data[mask]
-        sub_f = features_with_bias[mask]
-        sub_o = diag_orders[mask]
-        joint = np.column_stack([sub_g, np.ones(mask.sum(), dtype=np.int8)])
-        n_p = (sub_g[:, 0::2] == 1).sum(axis=1)
-        n_m = (sub_g[:, 1::2] == 1).sum(axis=1) + 1
-        for n_primary, n_metastatic in np.unique(np.column_stack([n_p, n_m]), axis=0):
-            if n_primary <= 0:
-                skipped += int((n_p == n_primary).sum())
-                continue
-            idx = (n_p == n_primary) & (n_m == n_metastatic)
-            add_to_bucket(
-                3,
-                int(n_primary),
-                int(n_metastatic),
-                np.column_stack([joint[idx], sub_o[idx]]),
-                sub_f[idx],
-            )
-
-    gene_names = [pair.name for pair in gene_pairs]
-    n_samples = len(df) - skipped
-    return buckets, n_events, len(feature_names), n_samples, gene_names, feature_names
+    Explicit observation_type takes precedence. Legacy 0/1 both marginalize
+    seeding; no Stop-derived Seeding field is treated as clinical evidence.
+    Missing genotypes in the observed compartment are rejected, not made WT.
+    max_active_events is a resource guard, not an undocumented sample filter.
+    """
+    if max_batch_size < 1 or max_active_events < 1 or not len(df):
+        raise ValueError('Positive batch/state limits and nonempty data required')
+    prep = preprocessor or TopologyTrainingPreprocessor(top_n_genes, core_drivers, covariate_schema,
+                primary_prefix, metastasis_prefix, mutation_suffix).fit(df)
+    pairs = prep.gene_pairs
+    types = observation_types(df, type_column)
+    features = np.column_stack((np.ones(len(df)), prep.transform(df)))
+    p = df[[g.primary for g in pairs]].apply(pd.to_numeric, errors='raise').to_numpy(float)
+    m = df[[g.metastasis for g in pairs]].apply(pd.to_numeric, errors='raise').to_numpy(float)
+    if 'observed_seeding' in df:
+        observed = df['observed_seeding'].to_numpy()
+        for i, kind in enumerate(types):
+            if kind != 4 and observed[i] != (0 if kind == 0 else 1):
+                raise ValueError('Observation type conflicts with independently observed seeding')
+    orders = df[diagnosis_order_column].to_numpy() if diagnosis_order_column in df else np.zeros(len(df))
+    groups = {}
+    for i, kind in enumerate(types):
+        for values in ([p[i]] if kind in (0, 1, 4) else [m[i]] if kind == 2 else [p[i], m[i]]):
+            if not np.isin(values, [0, 1]).all():
+                raise ValueError('Observed genomic calls must be binary and nonmissing')
+        if kind in (0, 1, 4):
+            data = np.r_[p[i], int(kind == 1)]
+            np_, nm_ = int(p[i].sum()) + int(kind == 1), 0
+            active = np_ + int(kind == 4)
+        elif kind == 2:
+            data = np.r_[m[i], 1]
+            np_, nm_ = 0, int(m[i].sum())+1
+            active = nm_
+        else:
+            if 'seeding_at_first_observation' not in df or df['seeding_at_first_observation'].iloc[i] != 1:
+                raise ValueError('UNRESOLVED_SCIENTIFIC_DECISION: paired likelihood requires confirmed seeding by first observation; later MT alone is insufficient')
+            if orders[i] not in (0, 1, 2):
+                raise ValueError('Diagnosis order must be 0 unknown, 1 PT-first or 2 MT-first')
+            data = np.r_[np.column_stack((p[i], m[i])).ravel(), 1, orders[i]]
+            # Each single compartment count INCLUDES the shared seed bit.
+            np_, nm_ = int(p[i].sum())+1, int(m[i].sum())+1
+            active = np_+nm_-1
+        if active > max_active_events:
+            raise ValueError('State exceeds max_active_events; explicitly resolve inclusion before fitting')
+        groups.setdefault((int(kind), np_, nm_), []).append((data.astype(np.int8), features[i]))
+    buckets = []
+    for key, rows in groups.items():
+        for start in range(0, len(rows), max_batch_size):
+            batch = rows[start:start+max_batch_size]
+            buckets.append((*key, np.stack([r[0] for r in batch]), np.stack([r[1] for r in batch])))
+    return buckets, len(pairs), len(prep.covariates.feature_names), len(df), [g.name for g in pairs], prep.covariates.feature_names
 
 
-def split_kinetic_feature_columns(all_columns: Iterable[str]) -> dict[str, list[str]]:
-    """Split columns into primary, metastatic and shared gatekeeper inputs."""
-
-    groups = {"pt_genomic": [], "mt_genomic": [], "pt_dynamic": [], "mt_dynamic": [], "shared": []}
-    dynamic_tokens = ("ageatseqrep", "vaf_mean", "nmut", "cna", "fga")
-    shared_tokens = ("age_at_diagnosis", "sex_female", "sex_male", "sex_unknown", "sex_nan", "paired")
-    label_tokens = ("label", "status", "pfs", "os", "vital", "response")
-
+def split_kinetic_feature_columns(all_columns):
+    """Exact baseline whitelist plus genomic indicators; no broad missingness rule."""
+    groups = {k: [] for k in ('pt_genomic', 'mt_genomic', 'pt_dynamic', 'mt_dynamic', 'shared')}
     for col in all_columns:
-        low = col.lower()
-        if any(token in low for token in label_tokens):
-            continue
-        if col.startswith("P.") and " (M)" in col:
-            groups["pt_genomic"].append(col)
-        elif col.startswith("M.") and " (M)" in col:
-            groups["mt_genomic"].append(col)
-        elif col.startswith("P.") or "primary" in low:
-            if any(token in low for token in dynamic_tokens) or "is_missing" in low:
-                groups["pt_dynamic"].append(col)
-        elif col.startswith("M.") or "metastatic" in low:
-            if any(token in low for token in dynamic_tokens) or "is_missing" in low:
-                groups["mt_dynamic"].append(col)
-        elif any(token in low for token in shared_tokens) or "is_missing" in low:
-            groups["shared"].append(col)
+        if re.fullmatch(r'[PM]\.[A-Za-z0-9_-]+ \(M\)', col):
+            groups['pt_genomic' if col.startswith('P.') else 'mt_genomic'].append(col)
+        elif col in ALLOWED_COLUMNS:
+            group = 'pt_dynamic' if 'Primary' in col or col.startswith('P.') else 'mt_dynamic' if 'Metastatic' in col or col.startswith('M.') else 'shared'
+            groups[group].append(col)
     return groups
 
 
-def generate_stop_label(patient_row: Mapping[str, Any], params: Mapping[str, float], pt_driver_cols: list[str], mt_driver_cols: list[str]) -> int:
-    """Generate the source-code kinetic Stop label when no direct label is provided."""
-
-    pfs_threshold_days = float(params.get("PFS_LONG_THRESHOLD_MONTHS", 9.0)) * 30.4375
-    if patient_row.get("PFS_days_is_Missing", 1) == 0 and pd.notna(patient_row.get("PFS_days")):
-        return 1 if float(patient_row["PFS_days"]) >= pfs_threshold_days else 0
-
-    pt_exists = patient_row.get("nMut_Primary_is_Missing", 1) == 0
-    mt_exists = patient_row.get("nMut_Metastatic_is_Missing", 1) == 0
-    if not pt_exists and not mt_exists:
-        return -1
-
-    def compartment_score(prefix: str, driver_cols: list[str]) -> float:
-        nmut_key = f"nMut_{prefix}"
-        cna_key = f"CNA_{prefix}"
-        fga_key = f"FGA_{prefix}"
-        vaf_key = f"VAF_mean_{prefix}"
-        score = 0.0
-        if patient_row.get(f"{vaf_key}_is_Missing", 1) == 0 and pd.notna(patient_row.get(vaf_key)):
-            score += 1.0 if float(patient_row[vaf_key]) >= float(params.get("CLONALITY_HIGH_THRESH", 0.5)) else 0.0
-        cna_value = patient_row.get(cna_key, patient_row.get(fga_key, np.nan))
-        cna_thresh = float(params.get(f"CNA_LOW_THRESH_{'PT' if prefix == 'Primary' else 'MT'}", 10.0))
-        if pd.notna(cna_value) and float(cna_value) <= cna_thresh:
-            score += 0.5
-        nmut_thresh = float(params.get(f"NMUT_LOW_THRESH_{'PT' if prefix == 'Primary' else 'MT'}", 20.0))
-        if pd.notna(patient_row.get(nmut_key)) and float(patient_row[nmut_key]) <= nmut_thresh:
-            score += 0.5
-        if driver_cols:
-            driver_total = sum(float(patient_row.get(col, 0.0)) for col in driver_cols)
-            driver_thresh = float(params.get(f"DRIVER_LOW_THRESH_{'PT' if prefix == 'Primary' else 'MT'}", 3.0))
-            if driver_total <= driver_thresh:
-                score += 1.0
-        return score
-
-    stable_threshold = float(params.get("BIO_SCORE_STABLE_THRESH", 1.0))
-    pt_stable = compartment_score("Primary", pt_driver_cols) >= stable_threshold if pt_exists else False
-    mt_stable = compartment_score("Metastatic", mt_driver_cols) >= stable_threshold if mt_exists else False
-    if pt_exists and mt_exists:
-        return 1 if pt_stable and mt_stable else 0
-    if pt_exists:
-        return 1 if pt_stable else 0
-    if mt_exists:
-        return 1 if mt_stable else 0
-    return -1
+def generate_stop_label(patient_row, params, pt_driver_cols, mt_driver_cols):
+    raise ValueError('Genomic proxy labels are retired; use an explicit ProgressionLabelSchema with raw days and censoring')
 
 
-def build_kinetic_matrices(
-    df: pd.DataFrame,
-    label_column: str = "Patient_Label",
-    label_params: Mapping[str, float] | None = None,
-) -> tuple[dict[str, np.ndarray], np.ndarray, dict[str, Any]]:
-    """Build gatekeeper matrices and fitted scalers from a feature table."""
+class KineticPreprocessor:
+    def fit(self, training_df):
+        validate_genomic_summary_units(training_df)
+        self.feature_groups = split_kinetic_feature_columns(training_df.columns)
+        self.transforms = {k: FoldPreprocessor(v).fit(training_df) for k, v in self.feature_groups.items()}
+        return self
 
-    groups = split_kinetic_feature_columns(df.columns)
-    if label_column in df.columns:
-        labels = df[label_column].fillna(-1).astype(int).to_numpy()
+    def transform(self, frame):
+        validate_genomic_summary_units(frame, require_provenance=False)
+        return {k: t.transform(frame).astype(np.float32) for k, t in self.transforms.items()}
+
+
+def build_kinetic_matrices(df, label_column='Patient_Label', label_params=None, *, preprocessor=None, label_schema=None):
+    """Transform a partition using preprocessing already fitted on training rows."""
+    if preprocessor is None:
+        raise ValueError('Split patients first; provide training-fitted KineticPreprocessor')
+    if label_schema is not None:
+        labels = build_progression_label(df, label_schema)
+    elif label_column in df:
+        raw = pd.to_numeric(df[label_column], errors='raise').fillna(-1).to_numpy()
+        if not np.isin(raw, [-1, 0, 1]).all():
+            raise ValueError('Labels must be -1 unknown, 0 operational Go, 1 operational Stop')
+        labels = raw.astype(int)
     else:
-        label_params = label_params or {}
-        labels = df.apply(lambda row: generate_stop_label(row, label_params, groups["pt_genomic"], groups["mt_genomic"]), axis=1).astype(int).to_numpy()
-
-    matrices = {
-        "pt_genomic": df[groups["pt_genomic"]].fillna(0).to_numpy(dtype=np.float32),
-        "mt_genomic": df[groups["mt_genomic"]].fillna(0).to_numpy(dtype=np.float32),
-        "pt_dynamic": df[groups["pt_dynamic"]].apply(pd.to_numeric, errors="coerce").fillna(0).to_numpy(dtype=np.float32),
-        "mt_dynamic": df[groups["mt_dynamic"]].apply(pd.to_numeric, errors="coerce").fillna(0).to_numpy(dtype=np.float32),
-        "shared": df[groups["shared"]].apply(pd.to_numeric, errors="coerce").fillna(0).to_numpy(dtype=np.float32),
-    }
-    scalers: dict[str, StandardScaler] = {}
-    for group in ["pt_dynamic", "mt_dynamic", "shared"]:
-        scaler = StandardScaler()
-        matrices[group] = scaler.fit_transform(matrices[group])
-        scalers[group] = scaler
-
-    metadata = {"scalers": scalers, "feature_groups": groups}
-    return matrices, labels, metadata
+        raise ValueError('Explicit label protocol is required; genomic proxy fallback is forbidden')
+    return preprocessor.transform(df), labels, {'preprocessor': preprocessor, 'feature_groups': preprocessor.feature_groups}

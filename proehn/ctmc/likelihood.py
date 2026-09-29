@@ -34,7 +34,7 @@ def R_i_inv_vec(
 
     lidg = -1.0 / (
         kron_diag(log_theta=log_theta, state=state, n_state=state_size)
-        - (diag_scal_p(log_d_p, state, x) + diag_scal_m(log_d_m, state, x))
+        - (diag_scal_p(log_d_p, state, jnp.ones_like(x)) + diag_scal_m(log_d_m, state, jnp.ones_like(x)))
     )
     y = lidg * x
 
@@ -90,7 +90,7 @@ def _lp_coupled_0(
     n_prim: int,
     n_met: int,
 ) -> jnp.ndarray:
-    """Paired-sample log-likelihood for simultaneous diagnosis."""
+    """Paired likelihood with unknown diagnosis order (sum of both orders)."""
 
     if n_prim + n_met - 1 == 1:
         return one_event._lp_coupled_0(log_theta, log_d_p, log_d_m, state_joint)

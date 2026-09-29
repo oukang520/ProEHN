@@ -49,7 +49,7 @@ def _lp_coupled_0(
     log_d_m: jnp.ndarray,
     state_joint: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Log-likelihood for simultaneous primary and metastatic observation."""
+    """Paired likelihood with unknown diagnosis order; not exact synchrony."""
 
     p0 = jnp.zeros(2).at[0].set(1.0)
     d_m_le = jnp.exp(log_d_m[-1])

@@ -52,12 +52,16 @@ class ProEHNTopologyModel:
         l1_ratio: float = 1.0,
         log_rate_clip_min: float = -20.0,
         log_rate_clip_max: float = 20.0,
+        l2_floor: float = 0.0,
     ) -> None:
         self.n_events = int(n_events)
         self.n_total = self.n_events + 1
         self.n_features = int(n_features) + 1
         self.regularization_strength = float(regularization_strength)
         self.l1_ratio = float(l1_ratio)
+        self.l2_floor = float(l2_floor)
+        if not 0 <= self.l1_ratio <= 1 or regularization_strength < 0 or l2_floor < 0:
+            raise ValueError("Invalid regularization coefficients")
         self.log_rate_clip_min = float(log_rate_clip_min)
         self.log_rate_clip_max = float(log_rate_clip_max)
         self.shapes = TopologyParameterShapes(self.n_features, self.n_total)
@@ -178,7 +182,13 @@ class ProEHNTopologyModel:
         clip_min = self.log_rate_clip_min
         clip_max = self.log_rate_clip_max
 
-        if bucket_type == 1:
+        if bucket_type == 4:
+            def unknown_seed(feats, genes):
+                a = self._loss_type1(W_theta, W_dp, W_dm, feats, genes.at[-1].set(0), n_primary, clip_min, clip_max)
+                b = self._loss_type1(W_theta, W_dp, W_dm, feats, genes.at[-1].set(1), n_primary+1, clip_min, clip_max)
+                return jnp.logaddexp(a, b)
+            lls = vmap(unknown_seed)(bucket_features, bucket_genotypes)
+        elif bucket_type in (0, 1):
             lls = vmap(self._loss_type1, in_axes=(None, None, None, 0, 0, None, None, None))(
                 W_theta, W_dp, W_dm, bucket_features, bucket_genotypes, n_primary, clip_min, clip_max
             )
@@ -203,11 +213,11 @@ class ProEHNTopologyModel:
                 clip_max,
             )
         else:
-            lls = jnp.array([0.0])
+            raise ValueError("Unsupported observation type")
         return -jnp.sum(lls)
 
     def regularization(self, params_flat: jnp.ndarray) -> jnp.ndarray:
-        """Elastic-net penalty on feature-modulating dimensions.
+        """Explicit elastic net plus optional ridge floor on feature dimensions.
 
         Basal intercept rates are left unpenalized, matching the current source-code
         intent that cohort-level rates should remain anchored while covariate effects
@@ -218,4 +228,4 @@ class ProEHNTopologyModel:
         l1 = jnp.sum(jnp.abs(W_theta[1:])) + jnp.sum(jnp.abs(W_dp[1:])) + jnp.sum(jnp.abs(W_dm[1:]))
         l2 = jnp.sum(W_theta[1:] ** 2) + jnp.sum(W_dp[1:] ** 2) + jnp.sum(W_dm[1:] ** 2)
         alpha = self.l1_ratio
-        return self.regularization_strength * (alpha * l1 + (1.0 - alpha + 0.1) * l2)
+        return self.regularization_strength * (alpha * l1 + (1.0 - alpha + self.l2_floor) * l2)
