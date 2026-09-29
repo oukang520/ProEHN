@@ -35,7 +35,7 @@ def test_cox_requires_aligned_confounders_and_names_analysis_explicitly(monkeypa
     import sys
     import pandas as pd
     from types import SimpleNamespace
-    from proehn.survival import cox_proportional_hazards
+    from proehn.survival import cox_proportional_hazards,SurvivalAdjustmentProtocol
     seen=[]
     class FakeCox:
         def fit(self,frame,**kwargs):
@@ -45,7 +45,8 @@ def test_cox_requires_aligned_confounders_and_names_analysis_explicitly(monkeypa
     oof=toy()
     assert cox_proportional_hazards(oof)['analysis']=='univariable'
     confounders=pd.DataFrame({'baseline_age':[40,45,50,55,60,65]},index=list('abcdef'))
-    assert cox_proportional_hazards(oof,baseline_confounders=confounders)['analysis']=='multivariable'
+    protocol=SurvivalAdjustmentProtocol('toy',('baseline_age',),'toy','1','error',True)
+    assert cox_proportional_hazards(oof,baseline_confounders=confounders,adjustment_protocol=protocol)['analysis']=='multivariable'
     assert 'baseline_age' in seen[-1]
     with pytest.raises(ValueError,match='aligned'):
-        cox_proportional_hazards(oof,baseline_confounders=confounders.iloc[::-1])
+        cox_proportional_hazards(oof,baseline_confounders=confounders.iloc[::-1],adjustment_protocol=protocol)

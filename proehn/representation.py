@@ -1,5 +1,5 @@
 """Patient specific transition representation; projections are separate summaries."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import numpy as np
 from scipy.special import softmax
 
@@ -88,6 +88,7 @@ class ObservedTransitionRepresentation(PatientTransitionRepresentation):
     posterior_weights: np.ndarray
     inference_method: str = 'exact_ctmc_resolvent'
     terminal_probability: float = 0.
+    inference_diagnostics: dict = field(default_factory=dict)
 
 
 class ExactInferenceLimitError(ValueError):
@@ -188,3 +189,68 @@ def patient_transition_representation_observed(model, params, features_with_bias
         np.array([distribution[e] for e in events]),int(kind),
         'fully_observed' if joint_snapshot else 'latent_marginalized',states,weights,
         terminal_probability=float(terminal))
+
+
+@dataclass(frozen=True)
+class PosteriorInferenceProtocol:
+    method: str = 'exact'
+    particles: int = 8192
+    random_seed: int = 42
+    minimum_effective_samples: float = 32.
+    exact_max_state_bits: int = 16
+    version: str = 'posterior-inference-v1'
+
+    def __post_init__(self):
+        if self.method not in ('exact', 'sequential_importance') or self.version != 'posterior-inference-v1':
+            raise ValueError('Explicit supported posterior method/version required')
+        if self.particles < 2 or int(self.particles) != self.particles or not 1 <= self.minimum_effective_samples <= self.particles or self.exact_max_state_bits < 1:
+            raise ValueError('Invalid frozen inference budget/quality policy')
+
+
+class PosteriorQualityError(ValueError):
+    pass
+
+
+def posterior_transition_representation(model, params, features_with_bias, gene_names,
+        observed_primary, observed_metastasis, observation_type, *, method,
+        diagnosis_order=None, first_seeding=-1, joint_snapshot=False, particles=8192,
+        random_seed=42, minimum_effective_samples=32., exact_max_state_bits=16,
+        version='posterior-inference-v1'):
+    """Explicit exact or sequential-importance backend, never automatic fallback.
+
+    The particle backend samples full observation histories, integrates waiting
+    times and reports effective sample size plus approximate Monte Carlo errors.
+    No matrix-free exact algorithm is claimed for normalized nonlinear hazards.
+    Increasing budget gives statistical convergence, not monotone per-seed error.
+    """
+    policy=PosteriorInferenceProtocol(method,particles,random_seed,minimum_effective_samples,exact_max_state_bits,version)
+    if method=='exact' or joint_snapshot:
+        return patient_transition_representation_observed(model,params,features_with_bias,gene_names,
+            observed_primary,observed_metastasis,observation_type,diagnosis_order=diagnosis_order,
+            first_seeding=first_seeding,joint_snapshot=joint_snapshot,max_state_bits=exact_max_state_bits)
+    from .particle_posterior import sample_observation_posterior, posterior_transition_moments
+    from .observations import ObservationType
+    kind=ObservationType(observation_type)
+    theta,dp,dm=model.compute_patient_params(*model.parse_params(params),features_with_bias,
+        model.log_rate_clip_min,model.log_rate_clip_max)
+    theta,dp,dm=map(np.asarray,(theta,dp,dm))
+    posterior=sample_observation_posterior(theta.tolist(),dp.tolist(),dm.tolist(),
+        None if observed_primary is None else list(observed_primary),
+        None if observed_metastasis is None else list(observed_metastasis),int(kind),
+        diagnosis_order=diagnosis_order,first_seeding=first_seeding,particles=particles,random_seed=random_seed)
+    if posterior.effective_sample_size < policy.minimum_effective_samples:
+        raise PosteriorQualityError('Posterior effective sample size below frozen quality threshold; no plug-in or exact fallback')
+    means,errors=posterior_transition_moments(theta.tolist(),posterior)
+    def named(key):
+        return (key[0],gene_names[key[1]]) if isinstance(key[1],int) else key
+    events=tuple(sorted(means,key=lambda x:named(x)))
+    diagnostics=dict(approximation=True,algorithm='sequential_importance_v1',particles=particles,
+        random_seed=random_seed,effective_sample_size=posterior.effective_sample_size,
+        log_evidence_estimate=posterior.log_evidence,
+        monte_carlo_standard_errors=[errors[key] for key in events],
+        error_semantics='asymptotic SNIS Monte Carlo SE; not a finite-sample error bound')
+    return ObservedTransitionRepresentation(theta,dp,dm,tuple(named(key) for key in events),
+        np.array([means[key] for key in events]),int(kind),'latent_marginalized',
+        np.asarray(posterior.states,dtype=np.int8),np.asarray(posterior.weights),
+        inference_method='sequential_importance_v1',terminal_probability=means.get(('terminal','No accessible event'),0.),
+        inference_diagnostics=diagnostics)

@@ -3,7 +3,8 @@
 All scores are OOF or explicitly held out. Operational label encoding for the
 kinetic network is Stop=1; progression metrics use Go=1 (1-Stop).
 """
-from dataclasses import dataclass
+from __future__ import annotations
+from dataclasses import dataclass, replace
 from typing import Protocol
 import numpy as np
 import pandas as pd
@@ -31,6 +32,7 @@ class BenchmarkFold:
 
 
 def patient_outer_folds(patient_ids, n_splits=5, validation_fraction=.25, random_seed=42):
+    """Generic isolation utility; NOT valid for manuscript target recovery."""
     groups = np.asarray(patient_ids)
     if groups.ndim != 1 or pd.isna(groups).any() or len(np.unique(groups)) < n_splits:
         raise ValueError('Known patient groups and enough patients are required')
@@ -49,6 +51,16 @@ class CalibratedThreshold:
     value: float
     criterion: str
     calibration_patient_ids: tuple[str, ...]
+    sensitivity: float | None = None
+    score_semantics: str = "target_presence"
+
+    def __post_init__(self):
+        if not np.isfinite(self.value) or not 0<=self.value<=np.nextafter(1.,np.inf) or not self.score_semantics:
+            raise ValueError('Finite probability threshold and score semantics required')
+        if self.criterion not in ('mcc','sensitivity','accuracy','validation','prespecified'):
+            raise ValueError('Unknown threshold provenance criterion')
+        if self.criterion!='prespecified' and not self.calibration_patient_ids:
+            raise ValueError('Validation patient provenance required')
 
     def apply(self, scores, *, test_patient_ids):
         if set(map(str, test_patient_ids)) & set(self.calibration_patient_ids):
@@ -75,7 +87,7 @@ def _binary(labels, scores):
 
 
 def calibrate_threshold(validation_labels, validation_scores, *, validation_patient_ids,
-                        criterion='mcc', sensitivity=.9):
+                        criterion='mcc', sensitivity=.9, score_semantics='target_presence'):
     """Select only on inner validation predictions; ties prefer larger cutoffs."""
     y, s = _binary(validation_labels, validation_scores)
     if len(validation_patient_ids) != len(s) or pd.isna(np.asarray(validation_patient_ids)).any() or len(np.unique(y)) < 2:
@@ -91,7 +103,7 @@ def calibrate_threshold(validation_labels, validation_scores, *, validation_pati
         selected = max(thresholds, key=lambda t: np.mean((s >= t) == y))
     else:
         raise ValueError('Unknown calibration criterion')
-    return CalibratedThreshold(float(selected), criterion, tuple(map(str, validation_patient_ids)))
+    return CalibratedThreshold(float(selected), criterion, tuple(map(str, validation_patient_ids)), sensitivity if criterion == "sensitivity" else None, score_semantics)
 
 
 def fixed_threshold_mcc(labels, scores, threshold, *, test_patient_ids):
@@ -121,6 +133,10 @@ class BenchmarkResult:
     patient_ids: tuple[str, ...]
     fold_ids: np.ndarray
     scores: np.ndarray
+    fold_protocol: FormalFoldProtocol | None = None
+    event_schema_versions: tuple[tuple[int, str], ...] = ()
+    candidate_predictions: tuple = ()
+    inference_provenance: tuple = ()
 
     def validate(self):
         if self.scores.shape[0] != len(self.patient_ids) or self.fold_ids.shape != (len(self.patient_ids),):
@@ -141,7 +157,7 @@ class FoldTrainer(Protocol):
     def fit(self, training: pd.DataFrame, validation: pd.DataFrame) -> FoldPredictor: ...
 
 
-def run_oof_benchmark(frame, patient_ids, folds, trainers, *, target, test_feature_builder):
+def run_oof_benchmark(frame, patient_ids, folds, trainers, *, target, test_feature_builder, fold_protocol=None):
     """Shared folds/patients/target masking for every registered baseline.
 
     The trainer receives training and inner-validation only. The frozen feature
@@ -150,6 +166,10 @@ def run_oof_benchmark(frame, patient_ids, folds, trainers, *, target, test_featu
     External Oncotree/HyperTraPS/MHN adapters implement FoldTrainer; unavailable
     methods must not be substituted with a surrogate under their formal name.
     """
+    if fold_protocol is not None:
+        fold_protocol.validate()
+        if tuple(map(str, patient_ids)) != fold_protocol.patient_ids or target != fold_protocol.target or tuple(folds) != fold_protocol.folds:
+            raise ValueError('Formal fold provenance does not match evaluation patients/target/folds')
     results = []
     if pd.isna(np.asarray(patient_ids)).any():
         raise ValueError('Missing patient identity')
@@ -168,17 +188,49 @@ def run_oof_benchmark(frame, patient_ids, folds, trainers, *, target, test_featu
         raise ValueError('Every sample must be held out exactly once')
     for name, factory in trainers.items():
         output = None
+        schema_versions = []
+        candidate_predictions = []
+        inference_provenance = []
         for fold in folds:
             # Fresh adapter and defensive copies prevent cross-fold/model state reuse.
-            predictor = factory().fit(frame.iloc[list(fold.train)].copy(), frame.iloc[list(fold.validation)].copy())
+            trainer = factory()
+            if getattr(trainer, 'requires_formal_folds', False) and fold_protocol is None:
+                raise ValueError('Formal manuscript evaluation requires grouped-stratified fold provenance')
+            if fold_protocol is not None and trainer.spec.target_column() != target:
+                raise ValueError('Trainer and formal fold target disagree')
+            if fold_protocol is not None and getattr(trainer, 'label_schema', None) is not None:
+                from .labels import build_progression_label, require_frozen_label_protocol
+                actual = build_progression_label(frame, require_frozen_label_protocol(trainer.label_schema))
+                if tuple(actual) != fold_protocol.kinetic_labels:
+                    raise ValueError('Clinical Stop/Go labels disagree with frozen fold provenance')
+            predictor = trainer.fit(frame.iloc[list(fold.train)].copy(), frame.iloc[list(fold.validation)].copy())
+            selected_schema = getattr(predictor, 'selected_event_schema', None)
+            if fold_protocol is not None:
+                if selected_schema is None:
+                    raise ValueError('Formal predictor must expose the shared selected event schema')
+                schema_versions.append((fold.fold_id, selected_schema.schema_version))
+                from dataclasses import asdict
+                inference=getattr(predictor,'inference_protocol',None)
+                if inference is not None:
+                    inference_provenance.append((fold.fold_id,asdict(inference)))
+                else:
+                    contract=getattr(predictor,'contract',None)
+                    if contract is None:
+                        raise ValueError('Formal predictor must identify its inference implementation')
+                    inference_provenance.append((fold.fold_id,dict(method='external',implementation=asdict(contract))))
             safe = test_feature_builder(frame.iloc[list(fold.test)].copy())
             prediction = np.asarray(predictor.predict(safe), float)
+            if fold_protocol is not None:
+                from .metrics import CandidateFoldScores
+                candidate_predictions.append(CandidateFoldScores(fold.fold_id, tuple(ids[i] for i in fold.test),
+                    selected_schema.target_candidate_events(predictor.spec.compartment), (predictor.spec.compartment,predictor.spec.target_gene),
+                    selected_schema.schema_version,np.asarray(predictor.predict_candidate_scores(safe),float)))
             if prediction.shape[0] != len(fold.test) or not np.isfinite(prediction).all():
                 raise ValueError('Invalid held-out prediction')
             if output is None:
                 output = np.empty((len(frame), *prediction.shape[1:]))
             output[list(fold.test)] = prediction
-        results.append(BenchmarkResult(name, target, ids, fold_ids.copy(), output).validate())
+        results.append(BenchmarkResult(name, target, ids, fold_ids.copy(), output, fold_protocol, tuple(schema_versions), tuple(candidate_predictions), tuple(inference_provenance)).validate())
     return results
 
 
@@ -267,9 +319,14 @@ class GroupedStratificationPolicy:
     minimum_labeled_kinetic_patients: int = 1
     shuffle: bool = False
     random_seed: int = 42
+    minimum_stop_patients: int = 1
+    minimum_go_patients: int = 1
 
     def __post_init__(self):
-        if self.outer_splits < 2 or self.inner_splits < 2 or min(self.minimum_positive_patients,self.minimum_negative_patients,self.minimum_labeled_kinetic_patients) < 1:
+        counts=(self.outer_splits,self.inner_splits,self.minimum_positive_patients,self.minimum_negative_patients,self.minimum_labeled_kinetic_patients,self.minimum_stop_patients,self.minimum_go_patients)
+        if any(int(v)!=v for v in counts) or int(self.random_seed)!=self.random_seed or self.random_seed<0:
+            raise ValueError('Integer frozen fold counts and nonnegative seed required')
+        if self.outer_splits < 2 or self.inner_splits < 2 or min(self.minimum_positive_patients,self.minimum_negative_patients,self.minimum_labeled_kinetic_patients,self.minimum_stop_patients,self.minimum_go_patients) < 1:
             raise ValueError('Freeze positive fold counts and coverage constraints')
 
 
@@ -294,6 +351,9 @@ def grouped_stratified_outer_folds(patient_ids, labels, *, target, policy, kinet
         values=np.unique(y[groups==patient])
         if len(values)!=1:
             raise TargetNotEvaluable(f'{target}: inconsistent within-patient stratification labels')
+        known_kinetic=np.unique(ky[(groups==patient)&(ky!=-1)])
+        if len(known_kinetic)>1:
+            raise TargetNotEvaluable(f'{target}: inconsistent within-patient Stop/Go label')
         uy.append(values[0])
     unique=np.asarray(unique); uy=np.asarray(uy)
     if len(unique)<policy.outer_splits or any(np.sum(uy==v)<policy.outer_splits*minimum for v,minimum in [(1,policy.minimum_positive_patients),(0,policy.minimum_negative_patients)]):
@@ -316,5 +376,79 @@ def grouped_stratified_outer_folds(patient_ids, labels, *, target, policy, kinet
             labeled=len(set(groups[ix][ky[ix]!=-1]))
             if positive<policy.minimum_positive_patients or negative<policy.minimum_negative_patients or labeled<policy.minimum_labeled_kinetic_patients:
                 raise TargetNotEvaluable(f'{target}: fold {i} violates prespecified coverage constraints')
+        for partition in (fold.train,fold.validation):
+            ix=np.asarray(partition)
+            stop=len(set(groups[ix][ky[ix]==1])); go=len(set(groups[ix][ky[ix]==0]))
+            if stop<policy.minimum_stop_patients or go<policy.minimum_go_patients:
+                raise TargetNotEvaluable(f'{target}: fold {i} violates frozen Stop/Go coverage')
         result.append(fold)
     return tuple(result)
+
+
+@dataclass(frozen=True)
+class FormalFoldProtocol:
+    target: str
+    patient_ids: tuple[str, ...]
+    policy: GroupedStratificationPolicy
+    stratification_target: str
+    target_labels: tuple[int, ...]
+    kinetic_labels: tuple[int, ...]
+    folds: tuple[BenchmarkFold, ...]
+    version: str = 'formal-target-folds-v1'
+
+    @classmethod
+    def create(cls, patient_ids, target_labels, kinetic_labels, *, target, policy):
+        ids=tuple(map(str,patient_ids))
+        if pd.isna(np.asarray(patient_ids)).any():
+            raise TargetNotEvaluable('Known patient IDs required')
+        folds=grouped_stratified_outer_folds(ids,target_labels,target=target,policy=policy,kinetic_labels=kinetic_labels)
+        return cls(target,ids,policy,target,tuple(target_labels),tuple(kinetic_labels),folds)
+
+    def validate(self):
+        if self.version!='formal-target-folds-v1' or not self.target or self.stratification_target!=self.target:
+            raise ValueError('Unsupported formal fold provenance')
+        expected=grouped_stratified_outer_folds(self.patient_ids,self.target_labels,target=self.target,
+            policy=self.policy,kinetic_labels=self.kinetic_labels)
+        if self.folds!=expected:
+            raise ValueError('Folds do not match the frozen grouped stratification policy')
+        return self
+
+
+def run_formal_oof_benchmark(frame, fold_protocol, trainers, *, event_spec):
+    """Only frozen, target-specific grouped-stratified manuscript evaluations."""
+    if not isinstance(fold_protocol,FormalFoldProtocol):
+        raise ValueError('Formal grouped-stratified fold provenance required')
+    fold_protocol.validate()
+    if fold_protocol.target!=event_spec.target_column():
+        raise ValueError('Fold target and masking target disagree')
+    target=event_spec._event_calls(frame,dict(event_spec.event_loci)[event_spec.target_column()],np.ones(len(frame),bool))
+    if tuple(target)!=fold_protocol.target_labels:
+        raise ValueError('Target labels disagree with the frozen split provenance')
+    if event_spec.event_selection_protocol is None:
+        raise ValueError('Shared frozen event selection protocol required')
+    from .events import select_event_schema
+    expected_versions = tuple((fold.fold_id, select_event_schema(
+        frame.iloc[list(fold.train)], event_spec).schema_version) for fold in fold_protocol.folds)
+    results=run_oof_benchmark(frame,frame[event_spec.patient_id_column],fold_protocol.folds,trainers,
+        target=fold_protocol.target,test_feature_builder=event_spec.features,fold_protocol=fold_protocol)
+    if any(r.event_schema_versions != expected_versions for r in results):
+        raise ValueError('Comparison models must use the shared training-only event spaces in every fold')
+    return results
+
+
+@dataclass(frozen=True)
+class PrespecifiedThresholdProtocol:
+    value: float
+    schema_id: str
+    score_semantics: str
+    version: str = '1'
+
+    def __post_init__(self):
+        if not self.schema_id or not self.version or not np.isfinite(self.value) or not 0<=self.value<=1:
+            raise ValueError('Explicit finite prespecified threshold provenance required')
+
+    def apply(self,scores,*,test_patient_ids):
+        s=_scores(scores)
+        if len(s)!=len(test_patient_ids):
+            raise ValueError('Threshold patient alignment mismatch')
+        return s>=self.value

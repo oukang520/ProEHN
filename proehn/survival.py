@@ -94,23 +94,59 @@ def harrell_c_index(oof):
     return concordant/comparable
 
 
-def cox_proportional_hazards(oof, *, baseline_confounders=None):
+@dataclass(frozen=True)
+class SurvivalAdjustmentProtocol:
+    cohort: str
+    covariates: tuple[str,...]
+    schema_id: str
+    version: str
+    missing_data_strategy: str
+    frozen: bool = False
+    measurement_time: str = 'baseline'
+
+    def validate(self):
+        if not self.frozen or not self.cohort or not self.schema_id or not self.version or self.measurement_time!='baseline':
+            raise ValueError('Frozen baseline survival adjustment protocol required')
+        if not self.covariates or len(set(self.covariates))!=len(self.covariates) or self.missing_data_strategy not in ('error','complete_case'):
+            raise ValueError('Explicit baseline confounders and missing-data strategy required')
+        from .preprocessing import DEFAULT_FORBIDDEN_FEATURES
+        if set(self.covariates)&(DEFAULT_FORBIDDEN_FEATURES|{'time_days','event','risk_score'}):
+            raise ValueError('Outcome/identifier variables cannot be baseline confounders')
+        return self
+
+
+def cox_proportional_hazards(oof, *, baseline_confounders=None, adjustment_protocol=None):
     oof.validate()
     try:
         from lifelines import CoxPHFitter
     except ImportError as exc:
         raise RuntimeError('EXTERNAL_DEPENDENCY_REQUIRED_BEFORE_RERUN: lifelines CoxPHFitter') from exc
     ids=list(oof.predictions.patient_ids)
+    if baseline_confounders is None and adjustment_protocol is not None:
+        raise ValueError('Adjustment protocol requires its explicit confounder matrix')
     frame=pd.DataFrame({'risk_score':oof.risk,'time_days':oof.time_days,'event':oof.event},index=ids)
     if baseline_confounders is not None:
+        if not isinstance(adjustment_protocol,SurvivalAdjustmentProtocol):
+            raise ValueError('Frozen survival adjustment protocol required for multivariable Cox')
+        adjustment_protocol.validate()
+        if not isinstance(baseline_confounders,pd.DataFrame):
+            raise ValueError('Explicit baseline confounder dataframe required')
+        if tuple(baseline_confounders.columns)!=adjustment_protocol.covariates:
+            raise ValueError('Confounder matrix differs from frozen baseline list')
         if not isinstance(baseline_confounders,pd.DataFrame) or list(baseline_confounders.index)!=ids or not baseline_confounders.shape[1]:
             raise ValueError('Multivariable Cox requires a patient-aligned baseline confounder matrix')
-        if set(frame)&set(baseline_confounders) or not baseline_confounders.columns.is_unique or not np.isfinite(baseline_confounders.to_numpy(float)).all():
+        if set(frame)&set(baseline_confounders) or not baseline_confounders.columns.is_unique or np.isinf(baseline_confounders.to_numpy(float)).any():
             raise ValueError('Invalid confounder columns/values')
         frame=frame.join(baseline_confounders)
+        if frame.isna().any().any():
+            if adjustment_protocol.missing_data_strategy=='error':
+                raise ValueError('Missing confounders forbidden by frozen adjustment protocol')
+            frame=frame.dropna()
+        if not len(frame): raise ValueError('No complete cases for frozen adjustment protocol')
     fitted=CoxPHFitter().fit(frame,duration_col='time_days',event_col='event')
     return dict(model=fitted,analysis='multivariable' if baseline_confounders is not None else 'univariable',
-        confounders=[] if baseline_confounders is None else list(baseline_confounders))
+        confounders=[] if baseline_confounders is None else list(baseline_confounders),
+        adjustment_protocol=adjustment_protocol, patient_ids=tuple(frame.index))
 
 
 def paired_delta_c_permutation(full, topology, *, repetitions, random_seed):

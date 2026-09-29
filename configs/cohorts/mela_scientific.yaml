@@ -7,9 +7,60 @@ covariate_protocol:
   version: '1'
   topology: [Age_at_Diagnosis, nMut_Primary, nMut_Metastatic, CNA_Primary, CNA_Metastatic, VAF_mean_Primary, VAF_mean_Metastatic]
   kinetic: [Age_at_Diagnosis, nMut_Primary, nMut_Metastatic, CNA_Primary, CNA_Metastatic, VAF_mean_Primary, VAF_mean_Metastatic]
-kinetic_probability:
+kinetic:
+  d_model: 128
+  n_head_layers: 2
+  dropout_rate: 0.2
+  learning_rate: 0.0001
+  weight_decay: 0.001
+  num_epochs: 150
+  patience: 15
   focal_gamma: 0.0
   calibration: none
+  random_seed: 42
+topology:
+  top_n_genes: 20
+  regularization_strength: 0.0
+  l1_ratio: 1.0
+  l2_floor: 0.0
+  log_rate_clip_min: -10.0
+  log_rate_clip_max: 6.0
+  optimizer_maxiter: 3000
+  random_seed: 42
+posterior_inference:
+  method: sequential_importance
+  particles: 8192
+  random_seed: 42
+  minimum_effective_samples: 32.0
+  exact_max_state_bits: 16
+  version: posterior-inference-v1
+event_selection:
+  schema_id: mela-events
+  version: '1'
+  external_driver_source: 'none; no external driver prior selected'
+  frozen_core_drivers: []
+  recurrent_event_rule: patient_prevalence
+  minimum_prevalence: 0.0
+  top_n_events: 20
+  training_only_frequency_selection: true
+  target_retention_rule: always_include
+fold_policy:
+  outer_splits: 5
+  inner_splits: 4
+  minimum_positive_patients: 1
+  minimum_negative_patients: 1
+  minimum_labeled_kinetic_patients: 1
+  minimum_stop_patients: 1
+  minimum_go_patients: 1
+  shuffle: false
+  random_seed: 42
+survival_adjustment:
+  cohort: MELA
+  covariates: []
+  schema_id: null
+  version: null
+  missing_data_strategy: error
+  frozen: false
 label_protocol:
   frozen: false
   schema_id: null

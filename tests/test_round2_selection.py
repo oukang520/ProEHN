@@ -9,8 +9,10 @@ from proehn.labels import ProgressionLabelSchema
 def test_formal_selection_only_receives_inner_partitions(monkeypatch):
     import proehn.benchmark as b
     schema=ProgressionLabelSchema('toy','pfs','event','days',10,schema_id='synthetic',version='1',frozen=True)
-    spec=SimpleNamespace(patient_id_column='patient_id',training_frame=lambda x:x)
-    trainer=FormalProEHNTrainer(spec,schema,configuration_source='inner_validation',topology_candidates=({'regularization_strength':.01},{'regularization_strength':.1}))
+    from final_test_support import explicit_configs,event_protocol
+    kinetic,topology=explicit_configs()
+    spec=SimpleNamespace(patient_id_column='patient_id',training_frame=lambda x:x,event_selection_protocol=event_protocol())
+    trainer=FormalProEHNTrainer(spec,schema,kinetic_config=kinetic,topology_config=topology,configuration_source='inner_validation',topology_candidates=({'regularization_strength':.01},{'regularization_strength':.1}))
     seen=[]
     def fitted(self,t,v):
         seen.append((tuple(t.patient_id),tuple(v.patient_id)))

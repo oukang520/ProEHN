@@ -13,7 +13,7 @@ from scipy.special import softmax
 from .kinetic import ProEHNKineticGatekeeper
 from .topology import ProEHNTopologyModel
 from .features import FoldPreprocessor
-from .representation import accessible_transition_log_rates, patient_transition_representation_observed, patient_transition_representation
+from .representation import accessible_transition_log_rates, posterior_transition_representation, patient_transition_representation, PosteriorInferenceProtocol
 
 
 class ProEHNEngine:
@@ -29,18 +29,24 @@ class ProEHNEngine:
         kinetic_params_path: str | Path | None = None,
         kinetic_metadata_path: str | Path | None = None,
         topology_model_path: str | Path | None = None,
-        stop_threshold: float = 0.90,
+        stop_threshold=None,
         fallback_go_probability: float = 0.85,
         regularization_strength: float | None = None,
         log_rate_clip_min: float | None = None,
         log_rate_clip_max: float | None = None,
         topology_preprocessing_path: str | Path | None = None,
+        inference_protocol: PosteriorInferenceProtocol | None = None,
     ) -> None:
         self.preprocessing = None
         self.fold_preprocessor = None
         if topology_preprocessing_path:
             self.preprocessing = json.loads(Path(topology_preprocessing_path).read_text(encoding='utf-8'))
-        self.stop_threshold = float(stop_threshold)
+        from .evaluation import CalibratedThreshold, PrespecifiedThresholdProtocol
+        if stop_threshold is not None and (not isinstance(stop_threshold, (CalibratedThreshold, PrespecifiedThresholdProtocol)) or stop_threshold.score_semantics != 'operational_stop'):
+            raise ValueError('Binary Stop decisions require an operational_stop threshold with provenance')
+        self.stop_threshold = stop_threshold
+        self._runtime_inference_protocol = inference_protocol
+        self.inference_protocol = inference_protocol or PosteriorInferenceProtocol()
         self.kinetic = ProEHNKineticGatekeeper(
             kinetic_params_path,
             kinetic_metadata_path,
@@ -77,6 +83,12 @@ class ProEHNEngine:
         self.topology_model, params, self.scientific_metadata, self.fold_preprocessor = load_topology_artifact(
             topology_model_path, regularization_strength=regularization_strength,
             log_rate_clip_min=log_rate_clip_min, log_rate_clip_max=log_rate_clip_max)
+        saved_inference = self.scientific_metadata.training_protocol.get('posterior_inference')
+        if saved_inference is not None:
+            saved_protocol = PosteriorInferenceProtocol(**saved_inference)
+            if self._runtime_inference_protocol is not None and self._runtime_inference_protocol != saved_protocol:
+                raise ValueError('Runtime posterior inference conflicts with saved protocol')
+            self.inference_protocol = saved_protocol
         self.topology_params = jnp.asarray(params)
         self.gene_names = list(self.scientific_metadata.gene_names)
         self.feature_names = list(self.scientific_metadata.feature_names)
@@ -199,14 +211,15 @@ class ProEHNEngine:
             raise ValueError('Seeding annotation conflicts with observation type')
         if kind == 4 and seed is not None:
             raise ValueError('Known seeding needs an explicit known-seeding observation type')
-        return patient_transition_representation_observed(self.topology_model, self.topology_params, z,
+        from dataclasses import asdict
+        return posterior_transition_representation(self.topology_model, self.topology_params, z,
             self.gene_names, genotype('P') if kind != 2 else None,
             genotype('M') if kind in (2, 3) else None, kind,
             diagnosis_order=patient_data.get('diag_order'),
             first_seeding=patient_data.get('seeding_at_first_observation', -1),
-            joint_snapshot=patient_data.get('joint_snapshot', False))
+            joint_snapshot=patient_data.get('joint_snapshot', False), **asdict(self.inference_protocol))
 
-    def _result(self, representation, prob_go):
+    def _result(self, representation, prob_go, patient_id=None):
         integrated = representation.integrated_scores(prob_go)
         rows = [dict(compartment=key[0], event=key[1], topology_probability=float(p),
                      integrated_event_score=float(score))
@@ -215,20 +228,27 @@ class ProEHNEngine:
         rows.sort(key=lambda row: row['integrated_event_score'], reverse=True)
         diagnostics = self._probability_diagnostics(prob_go, rows)
         diagnostics['calibration'] = self.kinetic.probability_protocol.calibration
-        return dict(prob_go=float(prob_go), prob_stop=float(1-prob_go),
-            operational_stop_predicted=bool(1-prob_go > self.stop_threshold),
+        result = dict(prob_go=float(prob_go), prob_stop=float(1-prob_go),
             integrated_event_scores=rows, probability_diagnostics=diagnostics,
             representation_kind=getattr(representation, 'representation_kind', 'fully_observed'),
             terminal_probability=getattr(representation, 'terminal_probability', sum(float(p) for key, p in zip(representation.accessible_events, representation.conditional_probabilities) if key[0] == 'terminal')),
+            inference_method=getattr(representation,'inference_method','fully_observed'),
+            inference_diagnostics=getattr(representation,'inference_diagnostics',{}),
             score_semantics='P(Go) times posterior-averaged conditional transition direction; no time horizon')
+        if self.stop_threshold is not None:
+            from .evaluation import CalibratedThreshold
+            if isinstance(self.stop_threshold,CalibratedThreshold) and patient_id is None:
+                raise ValueError('Patient identity required to check threshold calibration isolation')
+            result['operational_stop_predicted'] = bool(self.stop_threshold.apply([1-prob_go],test_patient_ids=[patient_id])[0])
+        return result
 
     def predict(self, patient_data: Mapping[str, Any]) -> dict[str, Any]:
         representation = self._representation(patient_data)
-        return self._result(representation, self.kinetic.predict_go_probability(patient_data))
+        return self._result(representation, self.kinetic.predict_go_probability(patient_data), patient_data.get('patient_id'))
 
     def predict_topology(self, state, observed_patient, prob_go):
         """Evaluate hypothetical state at the original observation-time covariates."""
-        return self._result(self._representation(state, covariates=observed_patient), prob_go)
+        return self._result(self._representation(state, covariates=observed_patient), prob_go, observed_patient.get('patient_id'))
 
     def transition_rates(self, patient_data):
         return [{"compartment":r["compartment"],"event":r["event"],"rate":float(np.exp(r["log_rate"]))}

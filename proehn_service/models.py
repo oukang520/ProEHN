@@ -52,7 +52,6 @@ class ModelAdapter:
         self.artifact_checksums = {path.name: sha256(path.read_bytes()).hexdigest() for path in self.paths}
         kinetic, topology = self.config["kinetic"], self.config["topology"]
         self.engine_options = {
-            "stop_threshold": kinetic["stop_threshold"],
             "fallback_go_probability": kinetic["fallback_go_probability"],
             "regularization_strength": topology["regularization_strength"],
             "log_rate_clip_min": topology["log_rate_clip_min"],

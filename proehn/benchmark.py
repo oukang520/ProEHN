@@ -3,7 +3,7 @@
 Cross-sectional target recovery tests ranking of masked observed events. It is
 not validation of longitudinal next-event probability. No surrogate default.
 """
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field, asdict
 import numpy as np
 import pandas as pd
 
@@ -13,8 +13,9 @@ from .training import fit_topology_model, fit_kinetic_model
 from .topology import ProEHNTopologyModel
 from .kinetic import ProEHNKineticGatekeeper
 from .labels import ProgressionLabelSchema, build_progression_label, require_frozen_label_protocol, label_provenance
-from .representation import patient_transition_representation_observed
+from .representation import posterior_transition_representation, PosteriorInferenceProtocol
 from .observations import observation_types
+from .events import EventSelectionProtocol, select_event_schema
 
 
 @dataclass(frozen=True)
@@ -27,8 +28,11 @@ class TargetRecoverySpec:
     patient_id_column: str = 'patient_id'
     stop_label_column: str = 'Patient_Label'
     event_schema_version: str = 'explicit-loci-v1'
+    event_selection_protocol: EventSelectionProtocol | None = None
 
     def __post_init__(self):
+        if self.event_selection_protocol is not None and self.event_schema_version != self.event_selection_protocol.schema_version:
+            raise ValueError('Event schema version differs from shared selection protocol')
         if not self.event_schema_version:
             raise ValueError('Frozen event schema version required')
         if self.compartment not in ('primary', 'metastasis') or not self.masking_protocols:
@@ -57,7 +61,7 @@ class TargetRecoverySpec:
         kinds = observation_types(raw)
         for protocol in self.masking_protocols:
             observed = np.isin(kinds, [0, 1, 3, 4] if protocol.compartment == 'Primary' else [2, 3])
-            required = protocol.mutation_columns + protocol.vaf_columns + protocol.cna_columns + protocol.baseline_columns
+            required = protocol.mutation_columns + protocol.vaf_columns + protocol.cna_columns + protocol.baseline_columns + protocol.cna_segment_length_columns
             source = raw.loc[observed] if observed.any() else pd.DataFrame(columns=required, index=raw.index[:0])
             part = build_leave_target_out_features(source, protocol).reindex(raw.index)
             for baseline in protocol.baseline_columns:
@@ -70,7 +74,7 @@ class TargetRecoverySpec:
         target_columns = {self.target_column('primary'), self.target_column('metastasis')}
         # Keep only named baseline/summaries and event indicators, not raw loci.
         allowed = {c for p in self.masking_protocols for c in p.baseline_columns}
-        allowed |= {f'{f}_{p.compartment}' for p in self.masking_protocols for f in ('nMut', 'VAF_mean', 'CNA')}
+        allowed |= {f'{f}_{p.compartment}' for p in self.masking_protocols for f in ('nMut', 'VAF_mean', 'CNA', 'TMB', 'FGA', 'CNA_adjusted')}
         out = out[[c for c in out if c in allowed]]
         for name, loci in self.event_loci:
             present = kinds != 2 if name.startswith('P.') else np.isin(kinds, [2, 3])
@@ -83,9 +87,14 @@ class TargetRecoverySpec:
                     raise ValueError('Observation type conflicts with independent seeding annotation')
                 if kind == 4 and not pd.isna(seed[i]):
                     raise ValueError('Known seeding requires the corresponding explicit observation type')
-        for name in ('diag_order', 'seeding_at_first_observation', 'joint_snapshot'):
-            if name in raw:
-                out[name] = raw[name].to_numpy()
+        # Missing history annotations mean unknown, never a seeded/synchronous plug-in.
+        defaults = {'diag_order': 0, 'seeding_at_first_observation': -1, 'joint_snapshot': False}
+        allowed_annotations = {'diag_order': (0,1,2), 'seeding_at_first_observation': (-1,0,1), 'joint_snapshot': (False,True)}
+        for name, default in defaults.items():
+            values = raw[name].fillna(default) if name in raw else pd.Series(default,index=raw.index)
+            if not np.isin(values.to_numpy(),allowed_annotations[name]).all():
+                raise ValueError('Invalid observation history annotation')
+            out[name] = values.to_numpy()
         out.attrs['feature_metadata'] = metadata
         return out
 
@@ -101,15 +110,15 @@ class TargetRecoverySpec:
 
     def outer_folds(self, raw, label_schema, policy):
         """One frozen target-specific split; ineligible labels are an explicit error."""
-        from .evaluation import grouped_stratified_outer_folds, TargetNotEvaluable
+        from .evaluation import FormalFoldProtocol, TargetNotEvaluable
         require_frozen_label_protocol(label_schema)
         kinds = observation_types(raw)
         eligible = kinds != 2 if self.compartment == 'primary' else np.isin(kinds, [2, 3])
         if not eligible.all():
             raise TargetNotEvaluable('Target compartment is unobserved: freeze the eligible patient set before generating folds')
         target = raw[list(dict(self.event_loci)[self.target_column()])].max(axis=1, skipna=False)
-        return grouped_stratified_outer_folds(raw[self.patient_id_column], target, target=self.target_column(),
-            policy=policy, kinetic_labels=build_progression_label(raw, label_schema))
+        return FormalFoldProtocol.create(raw[self.patient_id_column], target, build_progression_label(raw, label_schema),
+            target=self.target_column(), policy=policy)
 
     def training_frame(self, raw):
         out = self.features(raw)
@@ -117,7 +126,7 @@ class TargetRecoverySpec:
         for name, loci in self.event_loci:
             observed = kinds != 2 if name.startswith('P.') else np.isin(kinds, [2, 3])
             out[name] = self._event_calls(raw, loci, observed)
-        for name in ('observation_type', 'type', 'diag_order', 'seeding_at_first_observation'):
+        for name in ('observation_type', 'type'):
             if name in raw:
                 out[name] = raw[name].to_numpy()
         return out
@@ -130,6 +139,7 @@ class FormalProEHNPredictor:
     topology_preprocessor: TopologyTrainingPreprocessor
     kinetic: ProEHNKineticGatekeeper
     spec: TargetRecoverySpec
+    inference_protocol: PosteriorInferenceProtocol = field(default_factory=PosteriorInferenceProtocol)
 
     def __post_init__(self):
         if not isinstance(self.topology, ProEHNTopologyModel) or not isinstance(self.kinetic, ProEHNKineticGatekeeper) or not self.kinetic.ready:
@@ -141,19 +151,19 @@ class FormalProEHNPredictor:
         if not protocol or not hasattr(self, 'selection_metadata'):
             raise ValueError('Formal artifact requires completed training/selection provenance')
         protocol['selection'] = self.selection_metadata
+        protocol['posterior_inference'] = asdict(self.inference_protocol)
         prep = self.topology_preprocessor.covariates
         model = self.topology
         meta = ScientificArtifactMetadata(tuple(g.name for g in self.topology_preprocessor.gene_pairs),
             tuple(prep.feature_names), tuple(prep.columns), prep.metadata(), model.log_rate_clip_min,
             model.log_rate_clip_max, {k:getattr(model,k) for k in ('regularization_strength','l1_ratio','l2_floor')},
-            self.spec.event_schema_version, protocol['training_feature_provenance_version'], training_protocol=protocol)
+            self.selected_event_schema.schema_version, protocol['training_feature_provenance_version'], training_protocol=protocol)
         save_topology_artifact(path, self.topology_params, meta)
 
     def predict(self, features):
         return self._predict(features)
 
-    def _predict(self, features, *, progression_override=None):
-        """Return [P(Go), conditional target score, integrated target score]."""
+    def _prediction_rows(self, features, *, progression_override=None):
         for compartment in ('primary', 'metastasis'):
             if not (features[self.spec.target_column(compartment)] == 0).all():
                 raise ValueError('Target event must be masked before prediction')
@@ -162,26 +172,37 @@ class FormalProEHNPredictor:
         genes = [g.name for g in pairs]
         if self.spec.target_gene not in genes:
             raise ValueError('Target absent from fitted topology')
-        out = []
         for i, (_, row) in enumerate(features.iterrows()):
             go = self.kinetic.predict_go_probability(row.to_dict()) if progression_override is None else progression_override
             kind = int(row['observation_type'])
-            representation = patient_transition_representation_observed(
+            representation = posterior_transition_representation(
                 self.topology, self.topology_params, np.r_[1., z[i]], genes,
                 [row[g.primary] for g in pairs] if kind != 2 else None,
                 [row[g.metastasis] for g in pairs] if kind in (2, 3) else None, kind,
                 diagnosis_order=row.get('diag_order'), first_seeding=row.get('seeding_at_first_observation', -1),
-                joint_snapshot=bool(row.get('joint_snapshot', False)))
-            key = (self.spec.compartment, self.spec.target_gene)
-            if key not in representation.accessible_events:
-                raise ValueError('Target must be accessible for every evaluation patient')
-            j = representation.accessible_events.index(key)
-            out.append([go, representation.conditional_probabilities[j], representation.integrated_scores(go)[j]])
-        return np.asarray(out).reshape(len(features), 3)
+                joint_snapshot=bool(row.get('joint_snapshot', False)), **asdict(self.inference_protocol))
+            yield go, representation
+
+    def _predict(self, features, *, progression_override=None):
+        out=[]
+        for go, representation in self._prediction_rows(features, progression_override=progression_override):
+            key=(self.spec.compartment,self.spec.target_gene)
+            probability=dict(zip(representation.accessible_events,representation.conditional_probabilities)).get(key,0.)
+            out.append([go,probability,go*probability])
+        return np.asarray(out).reshape(len(features),3)
+
+    def predict_candidate_scores(self, features, *, progression_override=None):
+        events=self.selected_event_schema.target_candidate_events(self.spec.compartment)
+        rows=[]
+        for go, representation in self._prediction_rows(features, progression_override=progression_override):
+            conditional=dict(zip(representation.accessible_events,representation.conditional_probabilities))
+            rows.append([go*conditional.get(event,0.) for event in events])
+        return np.asarray(rows).reshape(len(features),len(events))
 
 
 @dataclass
 class FormalProEHNTrainer:
+    requires_formal_folds = True
     spec: TargetRecoverySpec
     label_schema: ProgressionLabelSchema
     top_n_genes: int = 20
@@ -190,11 +211,13 @@ class FormalProEHNTrainer:
     covariate_protocol: FrozenCovariateProtocol | None = None
     configuration_source: str = 'prespecified'
     topology_candidates: tuple[dict, ...] = ()
+    inference_protocol: PosteriorInferenceProtocol = field(default_factory=PosteriorInferenceProtocol)
 
     @classmethod
     def from_scientific_config(cls, spec, config):
         """Explicit protocol config: pending cohort templates intentionally cannot fit."""
         from .features import FrozenCovariateProtocol
+        from .scientific_config import validate_model_parameters
         label = dict(config.get('label_protocol', {}))
         cov = dict(config.get('covariate_protocol', {}))
         if not label.get('frozen') or not cov.get('frozen'):
@@ -205,13 +228,22 @@ class FormalProEHNTrainer:
         schema = ProgressionLabelSchema(cohort=cohort, **label)
         cov['topology'], cov['kinetic'] = tuple(cov['topology']), tuple(cov['kinetic'])
         protocol = FrozenCovariateProtocol(cohort=cohort, **cov).validate()
-        kinetic = dict(config.get('kinetic', {})); kinetic.update(config.get('kinetic_probability', {}))
+        kinetic = dict(config.get('kinetic', {}))
         topology = dict(config.get('topology', {}))
+        validate_model_parameters(kinetic, topology, config['configuration_source'], config.get('topology_candidates', ()))
+        event_config = dict(config['event_selection'])
+        event_config['frozen_core_drivers'] = tuple(event_config['frozen_core_drivers'])
+        event_protocol = EventSelectionProtocol(**event_config)
+        spec = replace(spec, event_selection_protocol=event_protocol, event_schema_version=event_protocol.schema_version)
         return cls(spec, schema, int(topology.pop('top_n_genes', 20)), kinetic, topology, protocol,
-            config.get('configuration_source', 'prespecified'), tuple(config.get('topology_candidates', ())))
+            config['configuration_source'], tuple(config.get('topology_candidates', ())), PosteriorInferenceProtocol(**config['posterior_inference']))
 
     def fit(self, training, validation):
         require_frozen_label_protocol(self.label_schema)
+        from .scientific_config import validate_model_parameters
+        validate_model_parameters(dict(self.kinetic_config or {}), dict(self.topology_config or {}, top_n_genes=self.top_n_genes), self.configuration_source, self.topology_candidates)
+        if self.spec.event_selection_protocol is None or self.spec.event_selection_protocol.top_n_events != self.top_n_genes:
+            raise ValueError('Formal trainer requires the shared event selection protocol')
         if self.configuration_source == 'prespecified':
             if self.topology_candidates:
                 raise ValueError('Prespecified mode cannot silently select candidates')
@@ -252,31 +284,35 @@ class FormalProEHNTrainer:
         if self.covariate_protocol is None or self.covariate_protocol.cohort != self.label_schema.cohort:
             raise ValueError('Matching frozen cohort covariate protocol required')
         self.covariate_protocol.validate(train_features).validate(val_features)
+        used=set(self.covariate_protocol.topology)|set(self.covariate_protocol.kinetic)
+        for masking in self.spec.masking_protocols:
+            burden_fields={f'{name}_{masking.compartment}' for name in ('nMut','TMB','CNA','FGA','CNA_adjusted')}
+            if used&burden_fields and (masking.burden_protocol is None or not masking.burden_protocol.frozen):
+                raise ValueError('Selected genomic burdens require a frozen assay/coverage protocol')
         for raw, features in ((training, train_features), (validation, val_features)):
             features[ids] = raw[ids].to_numpy()
             features[self.spec.stop_label_column] = build_progression_label(raw, self.label_schema)
+            if not {0, 1} <= set(features[self.spec.stop_label_column]):
+                raise ValueError('Training and validation each require observed Stop and Go patients')
             features.attrs['label_provenance'] = {self.spec.stop_label_column: label_provenance(self.label_schema)}
         topology_data = self.spec.training_frame(training)
         prep = TopologyTrainingPreprocessor(self.top_n_genes, schema=TopologyCovariateSchema(self.covariate_protocol.topology)).fit(topology_data)
-        if self.spec.target_gene not in [g.name for g in prep.gene_pairs]:
-            # A prespecified target is always retained; context ranking uses train only.
-            prep.gene_pairs = prep.gene_pairs[:max(0, self.top_n_genes-1)] + [GenePair(
-                self.spec.target_gene, self.spec.target_column('primary'), self.spec.target_column('metastasis'))]
-        from .representation import ExactInferenceLimitError
-        kinds = observation_types(topology_data)
-        snapshots = training.get('joint_snapshot', pd.Series(False, index=training.index)).fillna(False).to_numpy(bool)
-        if 2*len(prep.gene_pairs)+1 > 16 and not np.all((kinds == 3) & snapshots):
-            raise ExactInferenceLimitError('Formal partial/history inference exceeds exact state bound; fitting is blocked before optimization')
+        selected_schema = select_event_schema(training, self.spec)
+        prep.gene_pairs = [GenePair(g, f'P.{g} (M)', f'M.{g} (M)') for g in selected_schema.gene_names]
         gate = fit_kinetic_model(train_features, val_features, patient_id_column=ids,
                                label_column=self.spec.stop_label_column, label_schema=self.label_schema, model_config=dict(self.kinetic_config or {}, covariates=self.covariate_protocol.kinetic))
         buckets, ne, nf, ns, _, _ = build_topology_training_data(topology_data, preprocessor=prep)
         model, params, _ = fit_topology_model(buckets, ne, nf, ns, **dict(self.topology_config or {}))
         from dataclasses import asdict
         gate.scientific_training_protocol = dict(label_protocol=label_provenance(self.label_schema),
-            covariates=asdict(self.covariate_protocol), event_schema_version=self.spec.event_schema_version,
+            covariates=asdict(self.covariate_protocol), event_schema_version=selected_schema.schema_version,
             event_loci=[(name, list(loci)) for name, loci in self.spec.event_loci],
-            training_feature_provenance_version='leave-target-out-raw-loci-v1')
-        result = FormalProEHNPredictor(model, params, prep, gate, self.spec)
+            training_feature_provenance_version='leave-target-out-raw-loci-v1',
+            event_selection=asdict(self.spec.event_selection_protocol),
+            selected_gene_names=list(selected_schema.gene_names), posterior_inference=asdict(self.inference_protocol),
+            target_masking_protocols=[asdict(p) for p in self.spec.masking_protocols])
+        result = FormalProEHNPredictor(model, params, prep, gate, self.spec, self.inference_protocol)
+        result.selected_event_schema = selected_schema
         result.training_patient_ids = tuple(map(str, training[ids]))
         result.validation_patient_ids = tuple(map(str, validation[ids]))
         return result

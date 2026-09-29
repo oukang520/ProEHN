@@ -28,7 +28,6 @@ def main() -> None:
         kinetic_params_path=config["artifacts"]["kinetic_params"],
         kinetic_metadata_path=config["artifacts"]["kinetic_metadata"],
         topology_model_path=config["artifacts"]["topology_model"],
-        stop_threshold=config["kinetic"]["stop_threshold"],
         fallback_go_probability=config["kinetic"]["fallback_go_probability"],
         regularization_strength=config["topology"]["regularization_strength"],
         log_rate_clip_min=config["topology"]["log_rate_clip_min"],

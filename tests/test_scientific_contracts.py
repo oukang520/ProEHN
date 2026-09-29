@@ -323,7 +323,15 @@ def recovery_fixture():
 def test_formal_trainer_calls_formal_components_without_test_labels(monkeypatch):
     # Training functions are spies: no network or topology optimization occurs.
     import proehn.benchmark as benchmark
+    from dataclasses import replace
+    from proehn.evaluation import FormalFoldProtocol, GroupedStratificationPolicy
+    from final_test_support import explicit_configs, event_protocol
     df, spec = recovery_fixture()
+    protocol = event_protocol()
+    spec = replace(spec,event_selection_protocol=protocol,event_schema_version=protocol.schema_version)
+    kinetic_config,topology_config=explicit_configs()
+    df['raw_pfs_days']=np.where(df.pa==1,200.,10.)
+    df['raw_progression_event']=1
     seen = []
     def gate_fit(train, validation, **kwargs):
         assert not set(train.patient_id) & set(validation.patient_id)
@@ -345,9 +353,10 @@ def test_formal_trainer_calls_formal_components_without_test_labels(monkeypatch)
         return model, jnp.zeros(model.shapes.total_size), 0.
     monkeypatch.setattr(benchmark, 'fit_kinetic_model', gate_fit)
     monkeypatch.setattr(benchmark, 'fit_topology_model', topology_fit)
-    folds = patient_outer_folds(df.patient_id, n_splits=3)
-    results = run_oof_benchmark(df, df.patient_id, folds, {'ProEHN': lambda: FormalProEHNTrainer(spec, ProgressionLabelSchema('PACA', 'raw_pfs_days', 'raw_progression_event', 'days', 100., schema_id='synthetic', version='1', frozen=True), covariate_protocol=__import__('proehn.features', fromlist=['FrozenCovariateProtocol']).FrozenCovariateProtocol('PACA', 'synthetic', (), (), True))},
-                               target='A', test_feature_builder=spec.features)
+    fold_protocol=FormalFoldProtocol.create(df.patient_id,df.pa,df.pa,target=spec.target_column(),policy=GroupedStratificationPolicy(outer_splits=3,inner_splits=2))
+    folds=fold_protocol.folds
+    results = run_oof_benchmark(df, df.patient_id, folds, {'ProEHN': lambda: FormalProEHNTrainer(spec, ProgressionLabelSchema('PACA', 'raw_pfs_days', 'raw_progression_event', 'days', 100., schema_id='synthetic', version='1', frozen=True), kinetic_config=kinetic_config,topology_config=topology_config,covariate_protocol=__import__('proehn.features', fromlist=['FrozenCovariateProtocol']).FrozenCovariateProtocol('PACA', 'synthetic', (), (), True))},
+                               target=spec.target_column(), test_feature_builder=spec.features,fold_protocol=fold_protocol)
     assert results[0].scores.shape == (12, 3)
     assert [s[0] for s in seen].count('kinetic') == 3
     assert [s[0] for s in seen].count('topology') == 3

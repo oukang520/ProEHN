@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 import numpy as np
 import pandas as pd
+from .burden import GenomicBurdenProtocol
 
 # Closed vocabulary. Missingness is allowed only for these baseline measurements.
 BASELINE_COLUMNS = (
@@ -9,7 +10,7 @@ BASELINE_COLUMNS = (
     'Sex_Female', 'Sex_Male', 'Sex_Unknown',
     'nMut_Primary', 'nMut_Metastatic', 'VAF_mean_Primary', 'VAF_mean_Metastatic',
     'CNA_Primary', 'CNA_Metastatic', 'FGA_Primary', 'FGA_Metastatic',
-    'TMB_Primary', 'TMB_Metastatic',
+    'TMB_Primary', 'TMB_Metastatic', 'CNA_adjusted_Primary', 'CNA_adjusted_Metastatic',
 )
 ALLOWED_COLUMNS = BASELINE_COLUMNS + tuple(c+'_is_Missing' for c in BASELINE_COLUMNS)
 
@@ -115,6 +116,8 @@ class FeatureMetadata:
 
 
 FEATURE_METADATA = {
+    'FGA': FeatureMetadata('FGA','fraction','altered length divided by assayed length','sample-specific assayed Mb',(0,1),'Fraction of assayed genome altered'),
+    'CNA_adjusted': FeatureMetadata('CNA_adjusted','fraction','altered loci divided by assayed loci','sample-specific assayed loci',(0,1),'Coverage-adjusted fraction of assayed loci altered'),
     'nMut': FeatureMetadata('nMut', 'mutation count', 'none', 'none', (0, np.inf), 'Count of observed variant loci; not mutations per Mb'),
     'VAF_mean': FeatureMetadata('VAF_mean', 'fraction', 'mean over observed mutant loci', 'none', (0, 1), 'Mean observed variant allele fraction'),
     'CNA': FeatureMetadata('CNA', 'altered locus count', 'sum binary locus calls', 'none', (0, np.inf), 'Count of altered loci, not FGA'),
@@ -151,6 +154,9 @@ class TargetMaskingProtocol:
     target_cna_columns: tuple[str, ...]
     baseline_columns: tuple[str, ...] = ()
     compartment: str = 'Primary'
+    burden_protocol: GenomicBurdenProtocol | None = None
+    cna_segment_length_columns: tuple[str,...] = ()
+    cna_segments_nonoverlapping: bool = False
 
     def __post_init__(self):
         if len(self.mutation_columns) != len(self.vaf_columns):
@@ -163,7 +169,10 @@ class TargetMaskingProtocol:
         safe = {'Age_at_Diagnosis', 'P.AgeAtSeqRep', 'M.AgeAtSeqRep', 'Sex_Female', 'Sex_Male', 'Sex_Unknown'}
         if not set(self.baseline_columns) <= safe or self.compartment not in {'Primary', 'Metastatic'}:
             raise ValueError('Unverified target-derived or future covariate')
-        all_cols = self.mutation_columns+self.vaf_columns+self.cna_columns
+        if self.burden_protocol is not None and self.burden_protocol.cna_representation == 'fga':
+            if len(self.cna_segment_length_columns)!=len(self.cna_columns) or not self.cna_segments_nonoverlapping:
+                raise ValueError('FGA requires explicit nonoverlapping segment lengths aligned with CNA calls')
+        all_cols = self.mutation_columns+self.vaf_columns+self.cna_columns+self.cna_segment_length_columns
         if len(set(all_cols)) != len(all_cols):
             raise ValueError('Duplicate raw locus provenance')
 
@@ -191,8 +200,27 @@ def build_leave_target_out_features(raw_df, protocol):
     result[f'nMut_{p.compartment}'] = counts
     result[f'VAF_mean_{p.compartment}'] = np.divide(total_vaf, counts, out=np.full(len(raw_df), np.nan), where=counts > 0)
     result[f'CNA_{p.compartment}'] = cna[:, keep_c].sum(axis=1)
+    summary_names=['nMut','VAF_mean','CNA']
+    if p.burden_protocol is not None:
+        from .burden import genomic_burdens
+        bp=p.burden_protocol
+        mutation_name='nMut' if bp.mutation_representation=='raw_count' else 'TMB'
+        cna_name={'raw_count':'CNA','fga':'FGA','panel_adjusted':'CNA_adjusted'}[bp.cna_representation]
+        masked=raw_df.copy()
+        masked['__masked_mutation_count']=counts
+        masked['__masked_cna_numerator']=cna[:,keep_c].sum(axis=1)
+        if bp.cna_representation=='fga':
+            lengths=raw_df[list(p.cna_segment_length_columns)].to_numpy(float)
+            if not np.isfinite(lengths).all() or np.any(lengths<0):
+                raise ValueError('Measured nonnegative nonoverlapping segment lengths required')
+            masked['__masked_cna_numerator']=(cna[:,keep_c]*lengths[:,keep_c]).sum(axis=1)
+        burden=genomic_burdens(masked,bp,mutation_count_column='__masked_mutation_count',cna_numerator_column='__masked_cna_numerator') if len(masked) else dict(mutation_burden=np.empty(0),cna_burden=np.empty(0))
+        result=result.drop(columns=[f'nMut_{p.compartment}',f'CNA_{p.compartment}'])
+        result[f'{mutation_name}_{p.compartment}']=burden['mutation_burden']
+        result[f'{cna_name}_{p.compartment}']=burden['cna_burden']
+        summary_names=[mutation_name,'VAF_mean',cna_name]
     result.attrs['feature_metadata'] = {
-        f'{name}_{p.compartment}': FEATURE_METADATA[name] for name in ('nMut', 'VAF_mean', 'CNA')}
+        f'{name}_{p.compartment}': FEATURE_METADATA[name] for name in summary_names}
     return result
 
 
@@ -266,8 +294,8 @@ class FrozenCovariateProtocol:
         for columns in (self.topology, self.kinetic):
             TopologyCovariateSchema(tuple(columns))
             for compartment in ('Primary', 'Metastatic'):
-                for pair in (('nMut','TMB'), ('CNA','FGA')):
-                    if all(f'{name}_{compartment}' in columns for name in pair):
+                for pair in (('nMut','TMB'), ('CNA','FGA','CNA_adjusted')):
+                    if sum(f'{name}_{compartment}' in columns for name in pair)>1:
                         raise ValueError('Duplicate burden representations require a separate scientific protocol')
             if frame is not None and not set(columns) <= set(frame):
                 raise ValueError('Frozen cohort covariates unavailable; do not silently drop columns')
