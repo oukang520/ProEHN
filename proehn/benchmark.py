@@ -3,7 +3,7 @@
 Cross-sectional target recovery tests ranking of masked observed events. It is
 not validation of longitudinal next-event probability. No surrogate default.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import numpy as np
 import pandas as pd
 
@@ -140,8 +140,42 @@ class FormalProEHNTrainer:
     kinetic_config: dict | None = None
     topology_config: dict | None = None
     covariate_protocol: FrozenCovariateProtocol | None = None
+    configuration_source: str = 'prespecified'
+    topology_candidates: tuple[dict, ...] = ()
 
     def fit(self, training, validation):
+        require_frozen_label_protocol(self.label_schema)
+        if self.configuration_source == 'prespecified':
+            if self.topology_candidates:
+                raise ValueError('Prespecified mode cannot silently select candidates')
+            fitted = self._fit_prespecified(training, validation)
+            fitted.selection_metadata = dict(configuration_source='prespecified', topology_config=dict(self.topology_config or {}))
+            return fitted
+        if self.configuration_source != 'inner_validation' or not 1 <= len(self.topology_candidates) <= 8:
+            raise ValueError('Declare prespecified configuration or 1–8 frozen inner-validation candidates')
+        if any(not set(c) <= {'regularization_strength', 'l1_ratio'} for c in self.topology_candidates):
+            raise ValueError('Selection supports only necessary topology regularization candidates')
+        from .evaluation import select_on_inner_validation
+        fitted_candidates = {}
+        def fit_and_score(train, val, candidate):
+            config = dict(self.topology_config or {}); config.update(candidate)
+            fitted = replace(self, configuration_source='prespecified', topology_candidates=(), topology_config=config)._fit_prespecified(train, val)
+            # Training-fitted gene vocabulary/scaler, validation observation likelihood.
+            data = self.spec.training_frame(val)
+            buckets, _, _, n, _, _ = build_topology_training_data(data, preprocessor=fitted.topology_preprocessor)
+            import jax.numpy as jnp
+            loss = sum(float(fitted.topology.bucket_loss(jnp.asarray(fitted.topology_params), kind, np_, nm_, jnp.asarray(genes), jnp.asarray(z)))
+                for kind, np_, nm_, genes, z in buckets) / n
+            fitted_candidates[tuple(sorted(candidate.items()))] = fitted
+            return loss
+        selected = select_on_inner_validation(training, validation, self.topology_candidates, fit_and_score,
+            patient_id_column=self.spec.patient_id_column)
+        fitted = fitted_candidates[tuple(sorted(selected.items()))]
+        fitted.selection_metadata = dict(configuration_source='inner_validation', criterion='mean_validation_topology_nll',
+            candidates=[dict(c) for c in self.topology_candidates], selected=dict(selected))
+        return fitted
+
+    def _fit_prespecified(self, training, validation):
         require_frozen_label_protocol(self.label_schema)
         ids = self.spec.patient_id_column
         if training[ids].isna().any() or validation[ids].isna().any() or set(training[ids]) & set(validation[ids]):
@@ -164,4 +198,7 @@ class FormalProEHNTrainer:
                 self.spec.target_gene, self.spec.target_column('primary'), self.spec.target_column('metastasis'))]
         buckets, ne, nf, ns, _, _ = build_topology_training_data(topology_data, preprocessor=prep)
         model, params, _ = fit_topology_model(buckets, ne, nf, ns, **dict(self.topology_config or {}))
-        return FormalProEHNPredictor(model, params, prep, gate, self.spec)
+        result = FormalProEHNPredictor(model, params, prep, gate, self.spec)
+        result.training_patient_ids = tuple(map(str, training[ids]))
+        result.validation_patient_ids = tuple(map(str, validation[ids]))
+        return result
