@@ -215,6 +215,8 @@ def build_topology_training_data(
             first_seed = -1 if pd.isna(first_seed) else first_seed
             if first_seed not in (-1, 0, 1) or (orders[i] == 2 and first_seed == 0):
                 raise ValueError('MT-first observation requires seeding; invalid first-observation seeding annotation')
+            if first_seed == 0 and np.any(p[i] > m[i]):
+                raise ValueError('Pre-seeding primary mutations must be inherited by the metastatic lineage')
             if orders[i] not in (0, 1, 2):
                 raise ValueError('Diagnosis order must be 0 unknown, 1 PT-first or 2 MT-first')
             data = np.r_[np.column_stack((p[i], m[i])).ravel(), 1, first_seed, orders[i]]

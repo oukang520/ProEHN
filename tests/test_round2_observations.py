@@ -43,3 +43,11 @@ def test_paired_eventual_seeding_validation():
     frame=pd.DataFrame({'P.A (M)':[0],'M.A (M)':[0],'observation_type':[3], 'diag_order':[1], 'observed_seeding':[0]})
     with pytest.raises(ValueError,match='conflicts'):
         build_topology_training_data(frame)
+
+
+def test_unsupported_paired_history_has_zero_not_floored_likelihood():
+    import jax.numpy as jnp
+    from proehn.ctmc import likelihood as ll
+    theta=jnp.zeros((2,2)); diagnosis=jnp.zeros(2)
+    # A PT mutation present before seeding cannot disappear from sampled MT.
+    assert np.isneginf(ll._lp_coupled_1(theta,diagnosis,diagnosis,jnp.array([1,0,1]),2,1,0))

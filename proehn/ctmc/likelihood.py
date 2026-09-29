@@ -114,7 +114,9 @@ def _paired_order_probability(log_theta, log_d_p, log_d_m, state_joint,
 
 
 def _log_probability(value):
-    return jnp.log(jnp.maximum(value, jnp.finfo(value.dtype).tiny))
+    # Unsupported histories have zero mass, not a tiny artificial likelihood.
+    # Mask inside log as well to keep inactive autodiff branches finite.
+    return jnp.where(value > 0, jnp.log(jnp.where(value > 0, value, 1.)), -jnp.inf)
 
 
 def _lp_coupled_0(log_theta, log_d_p, log_d_m, state_joint, n_prim, n_met, first_seeding=-1):
