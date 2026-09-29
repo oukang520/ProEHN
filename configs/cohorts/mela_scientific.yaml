@@ -14,6 +14,9 @@ label_protocol:
   frozen: false
   schema_id: null
   version: null
+  pfs_column: null
+  event_column: null
+  response_column: null
   source_variables: null
   durable_threshold_days: null
   response_mapping: null

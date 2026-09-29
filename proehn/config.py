@@ -17,6 +17,7 @@ class KineticConfig:
     n_head_layers: int = 2
     dropout_rate: float = 0.2
     focal_gamma: float = 0.0
+    calibration: str = "none"
     learning_rate: float = 1e-4
     batch_size: int = 32
     num_epochs: int = 150
@@ -106,4 +107,7 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     path = Path(path)
     with path.open("r", encoding="utf-8") as handle:
         user_config = yaml.safe_load(handle) or {}
-    return _deep_update(defaults, user_config)
+    merged = _deep_update(defaults, user_config)
+    from .probability import KineticProbabilityProtocol
+    KineticProbabilityProtocol(float(merged['kinetic']['focal_gamma']), merged['kinetic']['calibration'])
+    return merged

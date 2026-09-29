@@ -104,10 +104,20 @@ def train_topology_from_csv(
     for required in ("target_event_schema_version", "training_feature_provenance_version"):
         if not config.get("data", {}).get(required):
             raise ValueError(f"Missing frozen artifact provenance: {required}")
+    from .features import FrozenCovariateProtocol
+    raw_protocol = dict(config.get('covariate_protocol', {}))
+    if not raw_protocol.get('frozen'):
+        raise ValueError('REQUIRES_PROTOCOL_FREEZE_BEFORE_RERUN: topology covariates must be frozen')
+    raw_protocol.setdefault('cohort', config.get('cohort', ''))
+    covariate_protocol = FrozenCovariateProtocol(**raw_protocol).validate()
     df = pd.read_csv(csv_path)
     data_cfg = config.get("data", {})
     df.attrs["feature_metadata"] = data_cfg.get("feature_metadata", {})
-    topo_cfg = config.get("topology", {})
+    topo_cfg = dict(config.get("topology", {}))
+    if 'covariates' in topo_cfg and tuple(topo_cfg['covariates']) != tuple(covariate_protocol.topology):
+        raise ValueError('Runtime topology covariates conflict with frozen protocol')
+    topo_cfg['covariates'] = covariate_protocol.topology
+    covariate_protocol.validate(df)
     from .features import TopologyCovariateSchema
     preprocessor = TopologyTrainingPreprocessor(
         int(topo_cfg.get('top_n_genes', 20)), topo_cfg.get('core_drivers', ()),
@@ -164,7 +174,7 @@ def train_topology_from_csv(
 
 
 def fit_kinetic_model(training_df, validation_df, *, patient_id_column,
-                      label_column='Patient_Label', model_config=None):
+                      label_column='Patient_Label', model_config=None, label_schema=None):
     """Train formal gatekeeper after splitting; early stopping sees inner val only.
 
     This entry point has no test-data argument and writes no artifacts. It uses
@@ -176,10 +186,20 @@ def fit_kinetic_model(training_df, validation_df, *, patient_id_column,
     from .probability import KineticProbabilityProtocol, PlattCalibration
     config = dict(model_config or {})
     probability_protocol = KineticProbabilityProtocol(float(config.get('focal_gamma', 0.)), config.get('calibration', 'none'))
+    from .labels import require_frozen_label_protocol, precomputed_progression_labels
+    if label_schema is None:
+        raise ValueError('Formal kinetic training requires a frozen label protocol')
+    require_frozen_label_protocol(label_schema)
+    precomputed_progression_labels(training_df, label_column, label_schema)
+    precomputed_progression_labels(validation_df, label_column, label_schema)
     train_ids, val_ids = training_df[patient_id_column], validation_df[patient_id_column]
     if train_ids.isna().any() or val_ids.isna().any() or set(train_ids) & set(val_ids):
         raise ValueError('Known, disjoint training and inner-validation patients required')
-    prep = KineticPreprocessor(config.get('covariates')).fit(training_df)
+    if 'covariates' not in config:
+        raise ValueError('Formal kinetic training requires explicitly frozen covariates')
+    from .features import FrozenCovariateProtocol
+    FrozenCovariateProtocol(label_schema.cohort, 'explicit-training-covariates', (), tuple(config['covariates']), True).validate(training_df).validate(validation_df)
+    prep = KineticPreprocessor(config['covariates']).fit(training_df)
     xt, yt, _ = build_kinetic_matrices(training_df, label_column, preprocessor=prep)
     xv, yv, _ = build_kinetic_matrices(validation_df, label_column, preprocessor=prep)
     if not np.isin(yt, [0, 1]).any() or not np.isin(yv, [0, 1]).any():

@@ -15,3 +15,10 @@ def test_formal_evaluation_refuses_unfrozen_protocol_before_data_access():
         precomputed_progression_labels(frame,'Patient_Label',frozen)
     frame.attrs['label_provenance']={'Patient_Label':label_provenance(frozen)}
     assert precomputed_progression_labels(frame,'Patient_Label',frozen).tolist()==[0,1]
+
+
+def test_direct_formal_kinetic_training_refuses_unprovenanced_labels():
+    from proehn.training import fit_kinetic_model
+    frame=pd.DataFrame({'patient_id':['a'],'Patient_Label':[1]})
+    with pytest.raises(ValueError,match='frozen label protocol'):
+        fit_kinetic_model(frame,frame,patient_id_column='patient_id')

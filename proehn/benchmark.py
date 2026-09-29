@@ -12,7 +12,7 @@ from .preprocessing import TopologyTrainingPreprocessor, build_topology_training
 from .training import fit_topology_model, fit_kinetic_model
 from .topology import ProEHNTopologyModel
 from .kinetic import ProEHNKineticGatekeeper
-from .labels import ProgressionLabelSchema, build_progression_label, require_frozen_label_protocol
+from .labels import ProgressionLabelSchema, build_progression_label, require_frozen_label_protocol, label_provenance
 from .representation import patient_transition_representation_observed
 from .observations import observation_types
 
@@ -149,7 +149,6 @@ class FormalProEHNPredictor:
             self.spec.event_schema_version, protocol['training_feature_provenance_version'], training_protocol=protocol)
         save_topology_artifact(path, self.topology_params, meta)
 
-
     def predict(self, features):
         return self._predict(features)
 
@@ -191,6 +190,25 @@ class FormalProEHNTrainer:
     covariate_protocol: FrozenCovariateProtocol | None = None
     configuration_source: str = 'prespecified'
     topology_candidates: tuple[dict, ...] = ()
+
+    @classmethod
+    def from_scientific_config(cls, spec, config):
+        """Explicit protocol config: pending cohort templates intentionally cannot fit."""
+        from .features import FrozenCovariateProtocol
+        label = dict(config.get('label_protocol', {}))
+        cov = dict(config.get('covariate_protocol', {}))
+        if not label.get('frozen') or not cov.get('frozen'):
+            raise ValueError('REQUIRES_PROTOCOL_FREEZE_BEFORE_RERUN')
+        cohort = config['cohort']
+        label.pop('source_variables', None)
+        label['response_mapping'] = tuple(tuple(x) for x in (label.get('response_mapping') or ()))
+        schema = ProgressionLabelSchema(cohort=cohort, **label)
+        cov['topology'], cov['kinetic'] = tuple(cov['topology']), tuple(cov['kinetic'])
+        protocol = FrozenCovariateProtocol(cohort=cohort, **cov).validate()
+        kinetic = dict(config.get('kinetic', {})); kinetic.update(config.get('kinetic_probability', {}))
+        topology = dict(config.get('topology', {}))
+        return cls(spec, schema, int(topology.pop('top_n_genes', 20)), kinetic, topology, protocol,
+            config.get('configuration_source', 'prespecified'), tuple(config.get('topology_candidates', ())))
 
     def fit(self, training, validation):
         require_frozen_label_protocol(self.label_schema)
@@ -237,16 +255,27 @@ class FormalProEHNTrainer:
         for raw, features in ((training, train_features), (validation, val_features)):
             features[ids] = raw[ids].to_numpy()
             features[self.spec.stop_label_column] = build_progression_label(raw, self.label_schema)
-        gate = fit_kinetic_model(train_features, val_features, patient_id_column=ids,
-                               label_column=self.spec.stop_label_column, model_config=dict(self.kinetic_config or {}, covariates=self.covariate_protocol.kinetic))
+            features.attrs['label_provenance'] = {self.spec.stop_label_column: label_provenance(self.label_schema)}
         topology_data = self.spec.training_frame(training)
         prep = TopologyTrainingPreprocessor(self.top_n_genes, schema=TopologyCovariateSchema(self.covariate_protocol.topology)).fit(topology_data)
         if self.spec.target_gene not in [g.name for g in prep.gene_pairs]:
             # A prespecified target is always retained; context ranking uses train only.
             prep.gene_pairs = prep.gene_pairs[:max(0, self.top_n_genes-1)] + [GenePair(
                 self.spec.target_gene, self.spec.target_column('primary'), self.spec.target_column('metastasis'))]
+        from .representation import ExactInferenceLimitError
+        kinds = observation_types(topology_data)
+        snapshots = training.get('joint_snapshot', pd.Series(False, index=training.index)).fillna(False).to_numpy(bool)
+        if 2*len(prep.gene_pairs)+1 > 16 and not np.all((kinds == 3) & snapshots):
+            raise ExactInferenceLimitError('Formal partial/history inference exceeds exact state bound; fitting is blocked before optimization')
+        gate = fit_kinetic_model(train_features, val_features, patient_id_column=ids,
+                               label_column=self.spec.stop_label_column, label_schema=self.label_schema, model_config=dict(self.kinetic_config or {}, covariates=self.covariate_protocol.kinetic))
         buckets, ne, nf, ns, _, _ = build_topology_training_data(topology_data, preprocessor=prep)
         model, params, _ = fit_topology_model(buckets, ne, nf, ns, **dict(self.topology_config or {}))
+        from dataclasses import asdict
+        gate.scientific_training_protocol = dict(label_protocol=label_provenance(self.label_schema),
+            covariates=asdict(self.covariate_protocol), event_schema_version=self.spec.event_schema_version,
+            event_loci=[(name, list(loci)) for name, loci in self.spec.event_loci],
+            training_feature_provenance_version='leave-target-out-raw-loci-v1')
         result = FormalProEHNPredictor(model, params, prep, gate, self.spec)
         result.training_patient_ids = tuple(map(str, training[ids]))
         result.validation_patient_ids = tuple(map(str, validation[ids]))
