@@ -11,10 +11,26 @@ from proehn.engine import ProEHNEngine
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Predict ProEHN conditional event scores for one patient.")
+    parser = argparse.ArgumentParser(
+        description="Predict ProEHN conditional event scores for one patient."
+    )
     parser.add_argument("--config", required=True, help="YAML configuration file.")
     parser.add_argument("--patient", required=True, help="Patient JSON file.")
-    parser.add_argument("--top-k", type=int, default=10, help="Number of top conditional event scores to print.")
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=10,
+        help="Number of top conditional event scores to print.",
+    )
+    parser.add_argument(
+        "--task", choices=("next-event", "masked-genotype"), default="next-event"
+    )
+    parser.add_argument(
+        "--target-gene", help="Modeled target gene for baseline reconstruction."
+    )
+    parser.add_argument(
+        "--compartment", choices=("primary", "metastasis"), default="primary"
+    )
     return parser.parse_args()
 
 
@@ -29,12 +45,22 @@ def main() -> None:
         kinetic_metadata_path=config["artifacts"]["kinetic_metadata"],
         topology_model_path=config["artifacts"]["topology_model"],
         fallback_go_probability=config["kinetic"]["fallback_go_probability"],
-        regularization_strength=config["topology"]["regularization_strength"],
-        log_rate_clip_min=config["topology"]["log_rate_clip_min"],
-        log_rate_clip_max=config["topology"]["log_rate_clip_max"],
     )
-    result = engine.predict(patient)
-    result["integrated_event_scores"] = result["integrated_event_scores"][: args.top_k]
+    if args.task == "masked-genotype":
+        if not args.target_gene:
+            raise ValueError(
+                "--target-gene is required for masked-genotype reconstruction"
+            )
+        result = engine.predict_masked_genotype(
+            patient, args.target_gene, args.compartment
+        )
+    else:
+        if args.top_k < 1:
+            raise ValueError("--top-k must be positive")
+        result = engine.predict(patient)
+        result["integrated_event_scores"] = result["integrated_event_scores"][
+            : args.top_k
+        ]
     print(json.dumps(result, indent=2))
 
 

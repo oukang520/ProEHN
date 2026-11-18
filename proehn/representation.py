@@ -1,4 +1,5 @@
 """Patient specific transition representation; projections are separate summaries."""
+
 from dataclasses import dataclass, field
 import numpy as np
 from scipy.special import softmax
@@ -13,8 +14,11 @@ class PatientTransitionRepresentation:
     conditional_probabilities: np.ndarray
 
     def integrated_scores(self, progression_propensity):
-        if not np.isfinite(progression_propensity) or not 0 <= progression_propensity <= 1:
-            raise ValueError('Progression propensity must lie in [0,1]')
+        if (
+            not np.isfinite(progression_propensity)
+            or not 0 <= progression_propensity <= 1
+        ):
+            raise ValueError("Progression propensity must lie in [0,1]")
         return self.conditional_probabilities * progression_propensity
 
 
@@ -28,40 +32,84 @@ def accessible_transition_log_rates(theta, genes, primary, metastasis, seeded):
     pt, mt = np.asarray(primary), np.asarray(metastasis)
     n = len(genes)
     theta = np.asarray(theta, float)
-    if theta.shape != (n+1, n+1) or not np.isfinite(theta).all():
-        raise ValueError('Invalid transition parameters')
-    if pt.shape != (n,) or mt.shape != (n,) or not np.isin(pt, [0, 1]).all() or not np.isin(mt, [0, 1]).all() or seeded not in (0, 1):
-        raise ValueError('Known binary observation-time genotype and seeding required')
-    if not seeded and mt.any():
-        raise ValueError('Observed MT conflicts with absence of seeding')
+    if theta.shape != (n + 1, n + 1) or not np.isfinite(theta).all():
+        raise ValueError("Invalid transition parameters")
+    if (
+        pt.shape != (n,)
+        or mt.shape != (n,)
+        or not np.isin(pt, [0, 1]).all()
+        or not np.isin(mt, [0, 1]).all()
+        or seeded not in (0, 1)
+    ):
+        raise ValueError("Known binary observation-time genotype and seeding required")
+    if not seeded and mt.any() and not np.array_equal(pt, mt):
+        raise ValueError("Observed MT conflicts with absence of seeding")
     rows = []
     active_p = np.flatnonzero(pt)
     for j, gene in enumerate(genes):
         if not pt[j]:
-            rows.append(dict(compartment='primary', event=gene, log_rate=float(theta[j, j]+theta[j, active_p].sum())))
+            rows.append(
+                dict(
+                    compartment="primary",
+                    event=gene,
+                    log_rate=float(theta[j, j] + theta[j, active_p].sum()),
+                )
+            )
     if not seeded:
-        rows.append(dict(compartment='primary', event='Metastatic seeding', log_rate=float(theta[n, n]+theta[n, active_p].sum())))
+        rows.append(
+            dict(
+                compartment="primary",
+                event="Metastatic seeding",
+                log_rate=float(theta[n, n] + theta[n, active_p].sum()),
+            )
+        )
     else:
         active_m = np.r_[np.flatnonzero(mt), n]
         for j, gene in enumerate(genes):
             if not mt[j]:
-                rows.append(dict(compartment='metastasis', event=gene, log_rate=float(theta[j, j]+theta[j, active_m].sum())))
+                rows.append(
+                    dict(
+                        compartment="metastasis",
+                        event=gene,
+                        log_rate=float(theta[j, j] + theta[j, active_m].sum()),
+                    )
+                )
     return rows
 
 
-def patient_transition_representation(model, params, features_with_bias, gene_names, primary, metastasis, seeded):
-    theta, dp, dm = model.compute_patient_params(*model.parse_params(params), features_with_bias,
-                                               model.log_rate_clip_min, model.log_rate_clip_max)
-    rows = accessible_transition_log_rates(theta, gene_names, primary, metastasis, seeded)
+def patient_transition_representation(
+    model, params, features_with_bias, gene_names, primary, metastasis, seeded
+):
+    theta, dp, dm = model.compute_patient_params(
+        *model.parse_params(params),
+        features_with_bias,
+        model.log_rate_clip_min,
+        model.log_rate_clip_max,
+    )
+    rows = accessible_transition_log_rates(
+        theta, gene_names, primary, metastasis, seeded
+    )
     if not rows:
-        return PatientTransitionRepresentation(np.asarray(theta), np.asarray(dp), np.asarray(dm),
-            (('terminal', 'No accessible event'),), np.ones(1))
-    probabilities = softmax([r['log_rate'] for r in rows])
-    return PatientTransitionRepresentation(np.asarray(theta), np.asarray(dp), np.asarray(dm),
-        tuple((r['compartment'], r['event']) for r in rows), probabilities)
+        return PatientTransitionRepresentation(
+            np.asarray(theta),
+            np.asarray(dp),
+            np.asarray(dm),
+            (("terminal", "No accessible event"),),
+            np.ones(1),
+        )
+    probabilities = softmax([r["log_rate"] for r in rows])
+    return PatientTransitionRepresentation(
+        np.asarray(theta),
+        np.asarray(dp),
+        np.asarray(dm),
+        tuple((r["compartment"], r["event"]) for r in rows),
+        probabilities,
+    )
 
 
-def model_implied_transition_path(theta, genes, primary, metastasis, seeded, *, max_steps=3):
+def model_implied_transition_path(
+    theta, genes, primary, metastasis, seeded, *, max_steps=3
+):
     """Greedy model-implied path at fixed covariates; no time or future-risk claim."""
     pt, mt, seed = list(primary), list(metastasis), int(seeded)
     path = []
@@ -69,14 +117,16 @@ def model_implied_transition_path(theta, genes, primary, metastasis, seeded, *, 
         rows = accessible_transition_log_rates(theta, genes, pt, mt, seed)
         if not rows:
             break
-        probabilities = softmax([r['log_rate'] for r in rows])
+        probabilities = softmax([r["log_rate"] for r in rows])
         index = int(np.argmax(probabilities))
         row = rows[index]
-        path.append({**row, 'conditional_probability': float(probabilities[index])})
-        if row['event'] == 'Metastatic seeding':
+        path.append({**row, "conditional_probability": float(probabilities[index])})
+        if row["event"] == "Metastatic seeding":
             seed, mt = 1, pt.copy()
         else:
-            (pt if row['compartment'] == 'primary' else mt)[genes.index(row['event'])] = 1
+            (pt if row["compartment"] == "primary" else mt)[
+                genes.index(row["event"])
+            ] = 1
     return path
 
 
@@ -86,8 +136,8 @@ class ObservedTransitionRepresentation(PatientTransitionRepresentation):
     representation_kind: str
     posterior_states: np.ndarray
     posterior_weights: np.ndarray
-    inference_method: str = 'exact_ctmc_resolvent'
-    terminal_probability: float = 0.
+    inference_method: str = "exact_ctmc_resolvent"
+    terminal_probability: float = 0.0
     inference_diagnostics: dict = field(default_factory=dict)
 
 
@@ -95,9 +145,20 @@ class ExactInferenceLimitError(ValueError):
     pass
 
 
-def patient_transition_representation_observed(model, params, features_with_bias, gene_names,
-        observed_primary, observed_metastasis, observation_type, *, diagnosis_order=None,
-        first_seeding=-1, joint_snapshot=False, max_state_bits=16):
+def patient_transition_representation_observed(
+    model,
+    params,
+    features_with_bias,
+    gene_names,
+    observed_primary,
+    observed_metastasis,
+    observation_type,
+    *,
+    diagnosis_order=None,
+    first_seeding=-1,
+    joint_snapshot=False,
+    max_state_bits=16,
+):
     """Exact posterior marginalization under the fitted observation process.
 
     PT-only: PT diagnosis clock, irrespective of unobserved MT diagnosis, matching
@@ -116,106 +177,197 @@ def patient_transition_representation_observed(model, params, features_with_bias
     import jax.numpy as jnp
     from .ctmc import vanilla as v
     from .observations import ObservationType
+
     kind = ObservationType(observation_type)
     n = len(gene_names)
     if joint_snapshot and kind != ObservationType.PAIRED:
-        raise ValueError('Joint snapshot requires both observed compartments')
-    if (kind in (0, 1, 4) and observed_metastasis is not None) or (kind == 2 and observed_primary is not None):
-        raise ValueError('Supplied genotype conflicts with partial-observation contract')
+        raise ValueError("Joint snapshot requires both observed compartments")
+    if (kind in (0, 1, 4) and observed_metastasis is not None) or (
+        kind == 2 and observed_primary is not None
+    ):
+        raise ValueError(
+            "Supplied genotype conflicts with partial-observation contract"
+        )
+
     def checked(value, required):
         if value is None:
             if required:
-                raise ValueError('Observed compartment genotype is required')
+                raise ValueError("Observed compartment genotype is required")
             return None
-        a=np.asarray(value)
-        if a.shape != (n,) or not np.isin(a,[0,1]).all():
-            raise ValueError('Observed genotype must contain n binary calls')
+        a = np.asarray(value)
+        if a.shape != (n,) or not np.isin(a, [0, 1]).all():
+            raise ValueError("Observed genotype must contain n binary calls")
         return a.astype(int)
-    pt=checked(observed_primary,kind != ObservationType.METASTASIS_ONLY)
-    mt=checked(observed_metastasis,kind in (ObservationType.METASTASIS_ONLY,ObservationType.PAIRED))
-    theta,dp,dm=model.compute_patient_params(*model.parse_params(params),features_with_bias,
-                                           model.log_rate_clip_min,model.log_rate_clip_max)
+
+    pt = checked(observed_primary, kind != ObservationType.METASTASIS_ONLY)
+    mt = checked(
+        observed_metastasis,
+        kind in (ObservationType.METASTASIS_ONLY, ObservationType.PAIRED),
+    )
+    theta, dp, dm = model.compute_patient_params(
+        *model.parse_params(params),
+        features_with_bias,
+        model.log_rate_clip_min,
+        model.log_rate_clip_max,
+    )
     if kind == ObservationType.PAIRED and joint_snapshot:
-        states=np.r_[np.column_stack((pt,mt)).ravel(),1][None,:]
-        weights=np.ones(1)
+        states = np.r_[np.column_stack((pt, mt)).ravel(), 1][None, :]
+        weights = np.ones(1)
     else:
-        if 2*n+1 > max_state_bits:
-            raise ExactInferenceLimitError(f'Exact posterior needs 2^{2*n+1} joint states; bound={max_state_bits}. No approximation applied.')
-        if kind == ObservationType.PAIRED and diagnosis_order not in (0,1,2):
-            raise ValueError('Paired history needs diagnosis order; use explicit joint_snapshot for simultaneous states')
-        if first_seeding not in (-1,0,1) or (diagnosis_order == 2 and first_seeding == 0):
-            raise ValueError('MT-first history cannot have unseeded first observation')
-        state=jnp.ones(2*n+1,dtype=int); size=2*n+1
-        x,_=v._states(state,size); x=np.asarray(x)
-        seed=x[:,-1]; xp=x[:,0:2*n:2]; xm=x[:,1:2*n:2]
-        p0=jnp.zeros(len(x)).at[0].set(1.)
-        d_p=v.diag_scal_p(dp,state,jnp.ones(len(x)))
-        d_m=v.diag_scal_m(dm,state,jnp.ones(len(x)))
+        if 2 * n + 1 > max_state_bits:
+            raise ExactInferenceLimitError(
+                f"Exact posterior needs 2^{2*n+1} joint states; bound={max_state_bits}. No approximation applied."
+            )
+        if kind == ObservationType.PAIRED and diagnosis_order not in (0, 1, 2):
+            raise ValueError(
+                "Paired history needs diagnosis order; use explicit joint_snapshot for simultaneous states"
+            )
+        if first_seeding not in (-1, 0, 1) or (
+            diagnosis_order == 2 and first_seeding == 0
+        ):
+            raise ValueError("MT-first history cannot have unseeded first observation")
+        state = jnp.ones(2 * n + 1, dtype=int)
+        size = 2 * n + 1
+        x, _ = v._states(state, size)
+        x = np.asarray(x)
+        seed = x[:, -1]
+        xp = x[:, 0 : 2 * n : 2]
+        xm = x[:, 1 : 2 * n : 2]
+        p0 = jnp.zeros(len(x)).at[0].set(1.0)
+        d_p = v.diag_scal_p(dp, state, jnp.ones(len(x)))
+        d_m = v.diag_scal_m(dm, state, jnp.ones(len(x)))
+
         def resolve(start, rates):
-            return v.R_inv_vec(theta,start,state,size,rates)
+            return v.R_inv_vec(theta, start, state, size, rates)
+
         if kind == ObservationType.PAIRED:
-            first=resolve(p0,d_p+d_m)
-            annotation=np.ones(len(x),bool) if first_seeding == -1 else seed==first_seeding
-            pt_first=resolve(first*d_p*jnp.asarray(np.all(xp==pt,axis=1)&annotation),d_m)*d_m
-            mt_first=resolve(first*d_m*jnp.asarray(np.all(xm==mt,axis=1)&annotation),d_p)*d_p
-            a=np.asarray(pt_first)*np.all(xm==mt,axis=1)
-            b=np.asarray(mt_first)*np.all(xp==pt,axis=1)
-            mass=(a+b if diagnosis_order == 0 else a if diagnosis_order == 1 else b)*seed
+            first = resolve(p0, d_p + d_m)
+            annotation = (
+                np.ones(len(x), bool) if first_seeding == -1 else seed == first_seeding
+            )
+            pt_first = (
+                resolve(
+                    first * d_p * jnp.asarray(np.all(xp == pt, axis=1) & annotation),
+                    d_m,
+                )
+                * d_m
+            )
+            mt_first = (
+                resolve(
+                    first * d_m * jnp.asarray(np.all(xm == mt, axis=1) & annotation),
+                    d_p,
+                )
+                * d_p
+            )
+            a = np.asarray(pt_first) * np.all(xm == mt, axis=1)
+            b = np.asarray(mt_first) * np.all(xp == pt, axis=1)
+            mass = (
+                a + b if diagnosis_order == 0 else a if diagnosis_order == 1 else b
+            ) * seed
         elif kind == ObservationType.METASTASIS_ONLY:
-            occupation=resolve(p0,d_p*jnp.asarray(1-seed)+d_m)
-            mass=np.asarray(occupation*d_m)*np.all(xm==mt,axis=1)*seed
+            occupation = resolve(p0, d_p * jnp.asarray(1 - seed) + d_m)
+            mass = np.asarray(occupation * d_m) * np.all(xm == mt, axis=1) * seed
         else:
-            mass=np.asarray(resolve(p0,d_p)*d_p)*np.all(xp==pt,axis=1)
-            if kind in (ObservationType.PRIMARY_NO_DISSEMINATION,ObservationType.PRIMARY_DISSEMINATED):
-                mass=mass*(seed==int(kind==ObservationType.PRIMARY_DISSEMINATED))
+            mass = np.asarray(resolve(p0, d_p) * d_p) * np.all(xp == pt, axis=1)
+            if kind in (
+                ObservationType.PRIMARY_NO_DISSEMINATION,
+                ObservationType.PRIMARY_DISSEMINATED,
+            ):
+                mass = mass * (
+                    seed == int(kind == ObservationType.PRIMARY_DISSEMINATED)
+                )
         if not np.isfinite(mass).all() or mass.sum() <= 0 or np.any(mass < -1e-10):
-            raise ValueError('Observation has zero or invalid likelihood under the model')
-        selected=mass>0
-        states=x[selected]; weights=mass[selected]/mass[selected].sum()
-    distribution={}; terminal=0.
-    for state,weight in zip(states,weights):
-        seeded=int(state[-1]); primary=state[:2*n:2]; metastatic=state[1:2*n:2]
+            raise ValueError(
+                "Observation has zero or invalid likelihood under the model"
+            )
+        selected = mass > 0
+        states = x[selected]
+        weights = mass[selected] / mass[selected].sum()
+    distribution = {}
+    terminal = 0.0
+    for state, weight in zip(states, weights):
+        seeded = int(state[-1])
+        primary = state[: 2 * n : 2]
+        metastatic = state[1 : 2 * n : 2]
         # Before seed the duplicated MT bits are an inherited lineage, not an MT observation.
-        rates=accessible_transition_log_rates(theta,gene_names,primary,metastatic if seeded else np.zeros(n,int),seeded)
+        rates = accessible_transition_log_rates(
+            theta,
+            gene_names,
+            primary,
+            metastatic if seeded else np.zeros(n, int),
+            seeded,
+        )
         if not rates:
-            terminal+=weight
-            distribution[('terminal','No accessible event')]=distribution.get(('terminal','No accessible event'),0.)+weight
+            terminal += weight
+            distribution[("terminal", "No accessible event")] = (
+                distribution.get(("terminal", "No accessible event"), 0.0) + weight
+            )
         else:
-            for row,p in zip(rates,softmax([r['log_rate'] for r in rates])):
-                key=(row['compartment'],row['event'])
-                distribution[key]=distribution.get(key,0.)+weight*p
-    events=tuple(sorted(distribution))
-    return ObservedTransitionRepresentation(np.asarray(theta),np.asarray(dp),np.asarray(dm),events,
-        np.array([distribution[e] for e in events]),int(kind),
-        'fully_observed' if joint_snapshot else 'latent_marginalized',states,weights,
-        terminal_probability=float(terminal))
+            for row, p in zip(rates, softmax([r["log_rate"] for r in rates])):
+                key = (row["compartment"], row["event"])
+                distribution[key] = distribution.get(key, 0.0) + weight * p
+    events = tuple(sorted(distribution))
+    return ObservedTransitionRepresentation(
+        np.asarray(theta),
+        np.asarray(dp),
+        np.asarray(dm),
+        events,
+        np.array([distribution[e] for e in events]),
+        int(kind),
+        "fully_observed" if joint_snapshot else "latent_marginalized",
+        states,
+        weights,
+        terminal_probability=float(terminal),
+    )
 
 
 @dataclass(frozen=True)
 class PosteriorInferenceProtocol:
-    method: str = 'exact'
+    method: str = "exact"
     particles: int = 8192
     random_seed: int = 42
-    minimum_effective_samples: float = 32.
+    minimum_effective_samples: float = 32.0
     exact_max_state_bits: int = 16
-    version: str = 'posterior-inference-v1'
+    version: str = "posterior-inference-v1"
 
     def __post_init__(self):
-        if self.method not in ('exact', 'sequential_importance') or self.version != 'posterior-inference-v1':
-            raise ValueError('Explicit supported posterior method/version required')
-        if self.particles < 2 or int(self.particles) != self.particles or not 1 <= self.minimum_effective_samples <= self.particles or self.exact_max_state_bits < 1:
-            raise ValueError('Invalid frozen inference budget/quality policy')
+        if (
+            self.method not in ("exact", "sequential_importance")
+            or self.version != "posterior-inference-v1"
+        ):
+            raise ValueError("Explicit supported posterior method/version required")
+        if (
+            self.particles < 2
+            or int(self.particles) != self.particles
+            or not 1 <= self.minimum_effective_samples <= self.particles
+            or self.exact_max_state_bits < 1
+        ):
+            raise ValueError("Invalid frozen inference budget/quality policy")
 
 
 class PosteriorQualityError(ValueError):
     pass
 
 
-def posterior_transition_representation(model, params, features_with_bias, gene_names,
-        observed_primary, observed_metastasis, observation_type, *, method,
-        diagnosis_order=None, first_seeding=-1, joint_snapshot=False, particles=8192,
-        random_seed=42, minimum_effective_samples=32., exact_max_state_bits=16,
-        version='posterior-inference-v1'):
+def posterior_transition_representation(
+    model,
+    params,
+    features_with_bias,
+    gene_names,
+    observed_primary,
+    observed_metastasis,
+    observation_type,
+    *,
+    method,
+    diagnosis_order=None,
+    first_seeding=-1,
+    joint_snapshot=False,
+    particles=8192,
+    random_seed=42,
+    minimum_effective_samples=32.0,
+    exact_max_state_bits=16,
+    version="posterior-inference-v1",
+):
     """Explicit exact or sequential-importance backend, never automatic fallback.
 
     The particle backend samples full observation histories, integrates waiting
@@ -223,34 +375,85 @@ def posterior_transition_representation(model, params, features_with_bias, gene_
     No matrix-free exact algorithm is claimed for normalized nonlinear hazards.
     Increasing budget gives statistical convergence, not monotone per-seed error.
     """
-    policy=PosteriorInferenceProtocol(method,particles,random_seed,minimum_effective_samples,exact_max_state_bits,version)
-    if method=='exact' or joint_snapshot:
-        return patient_transition_representation_observed(model,params,features_with_bias,gene_names,
-            observed_primary,observed_metastasis,observation_type,diagnosis_order=diagnosis_order,
-            first_seeding=first_seeding,joint_snapshot=joint_snapshot,max_state_bits=exact_max_state_bits)
-    from .particle_posterior import sample_observation_posterior, posterior_transition_moments
+    policy = PosteriorInferenceProtocol(
+        method,
+        particles,
+        random_seed,
+        minimum_effective_samples,
+        exact_max_state_bits,
+        version,
+    )
+    if method == "exact" or joint_snapshot:
+        return patient_transition_representation_observed(
+            model,
+            params,
+            features_with_bias,
+            gene_names,
+            observed_primary,
+            observed_metastasis,
+            observation_type,
+            diagnosis_order=diagnosis_order,
+            first_seeding=first_seeding,
+            joint_snapshot=joint_snapshot,
+            max_state_bits=exact_max_state_bits,
+        )
+    from .particle_posterior import (
+        sample_observation_posterior,
+        posterior_transition_moments,
+    )
     from .observations import ObservationType
-    kind=ObservationType(observation_type)
-    theta,dp,dm=model.compute_patient_params(*model.parse_params(params),features_with_bias,
-        model.log_rate_clip_min,model.log_rate_clip_max)
-    theta,dp,dm=map(np.asarray,(theta,dp,dm))
-    posterior=sample_observation_posterior(theta.tolist(),dp.tolist(),dm.tolist(),
+
+    kind = ObservationType(observation_type)
+    theta, dp, dm = model.compute_patient_params(
+        *model.parse_params(params),
+        features_with_bias,
+        model.log_rate_clip_min,
+        model.log_rate_clip_max,
+    )
+    theta, dp, dm = map(np.asarray, (theta, dp, dm))
+    posterior = sample_observation_posterior(
+        theta.tolist(),
+        dp.tolist(),
+        dm.tolist(),
         None if observed_primary is None else list(observed_primary),
-        None if observed_metastasis is None else list(observed_metastasis),int(kind),
-        diagnosis_order=diagnosis_order,first_seeding=first_seeding,particles=particles,random_seed=random_seed)
+        None if observed_metastasis is None else list(observed_metastasis),
+        int(kind),
+        diagnosis_order=diagnosis_order,
+        first_seeding=first_seeding,
+        particles=particles,
+        random_seed=random_seed,
+    )
     if posterior.effective_sample_size < policy.minimum_effective_samples:
-        raise PosteriorQualityError('Posterior effective sample size below frozen quality threshold; no plug-in or exact fallback')
-    means,errors=posterior_transition_moments(theta.tolist(),posterior)
+        raise PosteriorQualityError(
+            "Posterior effective sample size below frozen quality threshold; no plug-in or exact fallback"
+        )
+    means, errors = posterior_transition_moments(theta.tolist(), posterior)
+
     def named(key):
-        return (key[0],gene_names[key[1]]) if isinstance(key[1],int) else key
-    events=tuple(sorted(means,key=lambda x:named(x)))
-    diagnostics=dict(approximation=True,algorithm='sequential_importance_v1',particles=particles,
-        random_seed=random_seed,effective_sample_size=posterior.effective_sample_size,
+        return (key[0], gene_names[key[1]]) if isinstance(key[1], int) else key
+
+    events = tuple(sorted(means, key=lambda x: named(x)))
+    diagnostics = dict(
+        approximation=True,
+        algorithm="sequential_importance_v1",
+        particles=particles,
+        random_seed=random_seed,
+        effective_sample_size=posterior.effective_sample_size,
         log_evidence_estimate=posterior.log_evidence,
         monte_carlo_standard_errors=[errors[key] for key in events],
-        error_semantics='asymptotic SNIS Monte Carlo SE; not a finite-sample error bound')
-    return ObservedTransitionRepresentation(theta,dp,dm,tuple(named(key) for key in events),
-        np.array([means[key] for key in events]),int(kind),'latent_marginalized',
-        np.asarray(posterior.states,dtype=np.int8),np.asarray(posterior.weights),
-        inference_method='sequential_importance_v1',terminal_probability=means.get(('terminal','No accessible event'),0.),
-        inference_diagnostics=diagnostics)
+        error_semantics="asymptotic SNIS Monte Carlo SE; not a finite-sample error bound",
+    )
+    return ObservedTransitionRepresentation(
+        theta,
+        dp,
+        dm,
+        tuple(named(key) for key in events),
+        np.array([means[key] for key in events]),
+        int(kind),
+        "latent_marginalized",
+        np.asarray(posterior.states, dtype=np.int8),
+        np.asarray(posterior.weights),
+        inference_method="sequential_importance_v1",
+        terminal_probability=means.get(("terminal", "No accessible event"), 0.0),
+        inference_diagnostics=diagnostics,
+    )

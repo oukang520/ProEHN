@@ -1,0 +1,77 @@
+{
+  "scenarios": [
+    "no_context",
+    "evolution_context",
+    "observation_context",
+    "joint_context"
+  ],
+  "training_seeds": [
+    101,
+    202,
+    303
+  ],
+  "latent_prefix_length": 5,
+  "future_length": 3,
+  "patients_per_dataset": 8000,
+  "patients_per_context": 4000,
+  "families": {
+    "prefix_false_negative": {
+      "levels": [
+        0.0,
+        0.1,
+        0.3
+      ],
+      "mixture_weight_plus_context": 0.5,
+      "future_higher_order_amplitude": 0.0,
+      "definition": "Nested no-false-positive dropout of positive baseline genotype calls only. Before seeding use the same gene mask in PT and inherited MT; after seeding use independent PT/MT call masks. The known Seeding indicator is retained.",
+      "interpretation": "Observed-input false-negative stress with naive frozen-model calls, not latent-state posterior correction of missing data. Prefix5 refers to true biological history, not five remaining called mutations."
+    },
+    "context_sampling_shift": {
+      "levels": [
+        0.1,
+        0.5,
+        0.9
+      ],
+      "definition": "Assign the fixed analytical population weight to context+1 and its complement to context-1. The same4000 patients per context and all three observation-design strata remain. No context, phenotype or patient is relabelled.",
+      "prefix_false_negative_rate": 0.0,
+      "future_higher_order_amplitude": 0.0,
+      "interpretation": "Analytical case-mix/sampling shift only; not a newly sampled cohort or new generating-parameter replication."
+    },
+    "higher_order_future_generator": {
+      "levels": [
+        0.0,
+        0.5,
+        1.0
+      ],
+      "mixture_weight_plus_context": 0.5,
+      "prefix_false_negative_rate": 0.0,
+      "definition": "After the original true prefix only, add a log-hazard term amplitude * (-1)^j * x[(j+1)mod12] * x[(j+4)mod12] to mutation target j (zero-based). Apply the rule separately within PT and MT. Seeding and diagnosis hazards are unchanged. This is a third-order target-plus-two-regulators effect outside the fitted pairwise family.",
+      "interpretation": "Post-prefix process shift from original true parameters with fixed additional higher-order effects. Fitted parameters never generate test truth and never receive the new interaction."
+    }
+  },
+  "future_uniform_namespace": 2026111503,
+  "measurement_namespace": 2026111504,
+  "bootstrap_namespace": 2026111505,
+  "metrics": [
+    "unordered_future_set_nll",
+    "ordered_future_sequence_nll",
+    "next_event_nll",
+    "next_event_brier",
+    "next_event_mrr",
+    "next_event_recall_at_1",
+    "next_event_recall_at_3",
+    "next_event_recall_at_5"
+  ],
+  "primary_metric": "unordered_future_set_nll",
+  "bootstrap": {
+    "replicates": 2000,
+    "unit": "patient within the six fixed context-by-record-design strata from the core test cases",
+    "allocation": "Within each context retain the original PT-only/known-paired/masked-paired allocation. Each group mean receives q_context times n_group/n_context. Analytical context+1 weights are .1,.5,.9.",
+    "shared_draws": "Identical multinomial patient multiplicities across all models, comparisons, metrics and stress conditions within a fixed training dataset.",
+    "aggregation": "Equal weight across three fixed training datasets per mechanism. Patient-bootstrap intervals are conditional on saved fits, fixed true parameters, selected hyperparameters and fixed prefixes.",
+    "not_included": "No resampled population of trained models, no hyperparameter-selection uncertainty, no new generating-parameter draws.",
+    "interval": "Two-sided pointwise paired percentile95%."
+  },
+  "scope": "Biological-future frozen-method transfer and prefix-measurement stress. This is not clinical validation or recovery after retraining.",
+  "mechanism_scope": "No-context is a true null and observation-only has no true theta-context effect at known full biological state. Strict biological superiority is not expected there. These are controls, not failed cohorts to remove."
+}

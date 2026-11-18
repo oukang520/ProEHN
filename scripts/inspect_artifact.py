@@ -10,7 +10,9 @@ import numpy as np
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Inspect a ProEHN topology .npz artifact.")
+    parser = argparse.ArgumentParser(
+        description="Inspect a ProEHN topology .npz artifact."
+    )
     parser.add_argument("artifact", help="Path to the .npz artifact.")
     args = parser.parse_args()
 

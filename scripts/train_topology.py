@@ -15,7 +15,11 @@ def parse_args() -> argparse.Namespace:
         description="Train the ProEHN feature-modulated topology engine."
     )
     parser.add_argument("--config", required=True, help="YAML configuration file.")
-    parser.add_argument("--data", required=True, help="Input analysis-ready cohort CSV.")
+    parser.add_argument(
+        "--data",
+        required=True,
+        help="Prepared patient CSV; configured native training folds are selected before preprocessing.",
+    )
     parser.add_argument(
         "--out",
         default=None,
@@ -28,6 +32,13 @@ def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     output = args.out or config["artifacts"]["topology_model"]
+    output = Path(output).resolve()
+    if output.is_relative_to(Path(__file__).resolve().parents[1]):
+        raise ValueError("Choose an output artifact outside the source repository")
+    if output.exists():
+        raise FileExistsError(
+            "A fitted artifact already exists; choose a new output path"
+        )
     summary = train_topology_from_csv(args.data, output, config)
     print(json.dumps(summary, indent=2))
 

@@ -1,0 +1,53 @@
+project_name: ProEHN
+cohort: PACA
+random_seed: 11
+genes: [KRAS, TP53, ARID1A, CSMD1, KMT2C, NRXN3, ATM, RBM10, NRXN1, PCDH15, SMARCA4, DMD]
+data:
+  patient_id_column: patient_id
+  primary_prefix: P.
+  metastasis_prefix: M.
+  mutation_suffix: ''
+  stop_label_column: Patient_Label
+kinetic:
+  d_model: 32
+  n_head_layers: 1
+  dropout_rate: 0.2
+  focal_gamma: 0.0
+  calibration: platt
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  batch_size: null
+  num_epochs: 150
+  patience: 20
+  class_weights: null
+topology:
+  top_n_genes: 12
+  architecture: diagonal
+  feature_columns: [age, background_nMut, background_VAF_mean]
+  retained_features: [background_nMut, background_VAF_mean]
+  winsor_quantiles: [0.01, 0.99]
+  base_ridge: 0.005
+  diagonal_base_ridge_multiplier: 0.1
+  context_ridge: 0.05
+  optimizer_maxiter: 1200
+  optimizer_bound: 6.0
+  optimizer_ftol: 1.0e-8
+  optimizer_gtol: 1.0e-5
+  log_rate_clip_min: -5.0
+  log_rate_clip_max: 5.0
+folds:
+  count: 5
+  test: outer
+  validation_offset: 1
+  native_fit: [1, 2, 3, 4]
+  native_context_free_parameters: 273
+  snapshot_selected: [legacy, E05, legacy, legacy, legacy]
+  snapshot_counts: [[385, 122, 128], [387, 126, 122], [364, 145, 126], [376, 114, 145], [393, 128, 114]]
+clinical:
+  horizon_days: 180
+  label_source: post_primary_treatment_disease_free_interval
+  survival_origin: diagnosis
+  survival_cox_penalizer: 0.1
+  survival_fold_strata: true
+  source_component_bootstrap: 1000
+  source_component_permutations: 10000

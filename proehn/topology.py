@@ -48,10 +48,10 @@ class ProEHNTopologyModel:
         self,
         n_events: int,
         n_features: int,
-        regularization_strength: float = 0.01,
-        l1_ratio: float = 1.0,
-        log_rate_clip_min: float = -20.0,
-        log_rate_clip_max: float = 20.0,
+        regularization_strength: float = 0.002,
+        l1_ratio: float = 0.0,
+        log_rate_clip_min: float = -5.0,
+        log_rate_clip_max: float = 5.0,
         l2_floor: float = 0.0,
     ) -> None:
         self.n_events = int(n_events)
@@ -66,7 +66,9 @@ class ProEHNTopologyModel:
         self.log_rate_clip_max = float(log_rate_clip_max)
         self.shapes = TopologyParameterShapes(self.n_features, self.n_total)
 
-    def init_params(self, key: jax.Array, base_rates: jnp.ndarray | None = None) -> jnp.ndarray:
+    def init_params(
+        self, key: jax.Array, base_rates: jnp.ndarray | None = None
+    ) -> jnp.ndarray:
         """Initialize flattened parameters, optionally warm-starting basal rates."""
 
         key, k1, k2, k3 = jrp.split(key, 4)
@@ -80,7 +82,9 @@ class ProEHNTopologyModel:
         W_dm = jrp.normal(k3, (self.n_features, self.n_total)) * 0.01
         return jnp.concatenate([W_theta.flatten(), W_dp.flatten(), W_dm.flatten()])
 
-    def parse_params(self, params_flat: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    def parse_params(
+        self, params_flat: jnp.ndarray
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """Split a flattened parameter vector into transition and diagnosis tensors."""
 
         params = jnp.array(params_flat)
@@ -97,10 +101,14 @@ class ProEHNTopologyModel:
         W_dp: jnp.ndarray,
         W_dm: jnp.ndarray,
         features_with_bias: jnp.ndarray,
-        clip_min: float = -20.0,
-        clip_max: float = 20.0,
+        clip_min: float = -5.0,
+        clip_max: float = 5.0,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Project covariates into patient-specific transition and diagnosis rates."""
+        """Clip each projected coefficient before active effects are summed.
+
+        These bounds apply to individual log-transition/observation effects,
+        rather than to a complete state-specific log hazard (Methods Eq. 2).
+        """
 
         theta = jnp.einsum("k,kij->ij", features_with_bias, W_theta)
         log_dp = jnp.einsum("k,ki->i", features_with_bias, W_dp)
@@ -122,7 +130,9 @@ class ProEHNTopologyModel:
         clip_min: float,
         clip_max: float,
     ) -> jnp.ndarray:
-        theta, log_dp, _ = ProEHNTopologyModel.compute_patient_params(W_theta, W_dp, W_dm, features, clip_min, clip_max)
+        theta, log_dp, _ = ProEHNTopologyModel.compute_patient_params(
+            W_theta, W_dp, W_dm, features, clip_min, clip_max
+        )
         return ctmc_likelihood._lp_prim_obs(theta, log_dp, state_p, int(n_prim_static))
 
     @staticmethod
@@ -136,8 +146,12 @@ class ProEHNTopologyModel:
         clip_min: float,
         clip_max: float,
     ) -> jnp.ndarray:
-        theta, log_dp, log_dm = ProEHNTopologyModel.compute_patient_params(W_theta, W_dp, W_dm, features, clip_min, clip_max)
-        return ctmc_likelihood._lp_met_obs(theta, log_dp, log_dm, state_m_full, int(n_met_static))
+        theta, log_dp, log_dm = ProEHNTopologyModel.compute_patient_params(
+            W_theta, W_dp, W_dm, features, clip_min, clip_max
+        )
+        return ctmc_likelihood._lp_met_obs(
+            theta, log_dp, log_dm, state_m_full, int(n_met_static)
+        )
 
     @staticmethod
     def _loss_type3(
@@ -153,18 +167,26 @@ class ProEHNTopologyModel:
         clip_min: float,
         clip_max: float,
     ) -> jnp.ndarray:
-        theta, log_dp, log_dm = ProEHNTopologyModel.compute_patient_params(W_theta, W_dp, W_dm, features, clip_min, clip_max)
+        theta, log_dp, log_dm = ProEHNTopologyModel.compute_patient_params(
+            W_theta, W_dp, W_dm, features, clip_min, clip_max
+        )
         np_s = int(n_prim_static)
         nm_s = int(n_met_static)
 
         def sync(_: None) -> jnp.ndarray:
-            return ctmc_likelihood._lp_coupled_0(theta, log_dp, log_dm, state_joint, np_s, nm_s, first_seeding)
+            return ctmc_likelihood._lp_coupled_0(
+                theta, log_dp, log_dm, state_joint, np_s, nm_s, first_seeding
+            )
 
         def pt_first(_: None) -> jnp.ndarray:
-            return ctmc_likelihood._lp_coupled_1(theta, log_dp, log_dm, state_joint, np_s, nm_s, first_seeding)
+            return ctmc_likelihood._lp_coupled_1(
+                theta, log_dp, log_dm, state_joint, np_s, nm_s, first_seeding
+            )
 
         def mt_first(_: None) -> jnp.ndarray:
-            return ctmc_likelihood._lp_coupled_2(theta, log_dp, log_dm, state_joint, np_s, nm_s, first_seeding)
+            return ctmc_likelihood._lp_coupled_2(
+                theta, log_dp, log_dm, state_joint, np_s, nm_s, first_seeding
+            )
 
         return jax.lax.switch(diag_order.astype(int), [sync, pt_first, mt_first], None)
 
@@ -176,6 +198,7 @@ class ProEHNTopologyModel:
         n_metastatic: int,
         bucket_genotypes: jnp.ndarray,
         bucket_features: jnp.ndarray,
+        sample_weights: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Negative log-likelihood for one homogeneous observation bucket."""
 
@@ -184,25 +207,70 @@ class ProEHNTopologyModel:
         clip_max = self.log_rate_clip_max
 
         if bucket_type == 4:
+
             def unknown_seed(feats, genes):
-                a = self._loss_type1(W_theta, W_dp, W_dm, feats, genes.at[-1].set(0), n_primary, clip_min, clip_max)
-                b = self._loss_type1(W_theta, W_dp, W_dm, feats, genes.at[-1].set(1), n_primary+1, clip_min, clip_max)
+                a = self._loss_type1(
+                    W_theta,
+                    W_dp,
+                    W_dm,
+                    feats,
+                    genes.at[-1].set(0),
+                    n_primary,
+                    clip_min,
+                    clip_max,
+                )
+                b = self._loss_type1(
+                    W_theta,
+                    W_dp,
+                    W_dm,
+                    feats,
+                    genes.at[-1].set(1),
+                    n_primary + 1,
+                    clip_min,
+                    clip_max,
+                )
                 return jnp.logaddexp(a, b)
+
             lls = vmap(unknown_seed)(bucket_features, bucket_genotypes)
         elif bucket_type in (0, 1):
-            lls = vmap(self._loss_type1, in_axes=(None, None, None, 0, 0, None, None, None))(
-                W_theta, W_dp, W_dm, bucket_features, bucket_genotypes, n_primary, clip_min, clip_max
+            lls = vmap(
+                self._loss_type1, in_axes=(None, None, None, 0, 0, None, None, None)
+            )(
+                W_theta,
+                W_dp,
+                W_dm,
+                bucket_features,
+                bucket_genotypes,
+                n_primary,
+                clip_min,
+                clip_max,
             )
         elif bucket_type == 2:
-            lls = vmap(self._loss_type2, in_axes=(None, None, None, 0, 0, None, None, None))(
-                W_theta, W_dp, W_dm, bucket_features, bucket_genotypes, n_metastatic, clip_min, clip_max
+            lls = vmap(
+                self._loss_type2, in_axes=(None, None, None, 0, 0, None, None, None)
+            )(
+                W_theta,
+                W_dp,
+                W_dm,
+                bucket_features,
+                bucket_genotypes,
+                n_metastatic,
+                clip_min,
+                clip_max,
             )
         elif bucket_type == 3:
             joint_len = 2 * self.n_events + 1
             b_joint = bucket_genotypes[:, :joint_len]
             b_order = bucket_genotypes[:, -1]
-            b_first = bucket_genotypes[:, joint_len] if bucket_genotypes.shape[1] == joint_len+2 else jnp.full(len(b_order), -1)
-            lls = vmap(self._loss_type3, in_axes=(None, None, None, 0, 0, 0, 0, None, None, None, None))(
+            b_first = (
+                bucket_genotypes[:, joint_len]
+                if bucket_genotypes.shape[1] == joint_len + 2
+                else jnp.full(len(b_order), -1)
+            )
+            lls = vmap(
+                self._loss_type3,
+                in_axes=(None, None, None, 0, 0, 0, 0, None, None, None, None),
+            )(
                 W_theta,
                 W_dp,
                 W_dm,
@@ -217,10 +285,10 @@ class ProEHNTopologyModel:
             )
         else:
             raise ValueError("Unsupported observation type")
-        return -jnp.sum(lls)
+        return -jnp.sum(lls if sample_weights is None else lls * sample_weights)
 
     def regularization(self, params_flat: jnp.ndarray) -> jnp.ndarray:
-        """Explicit elastic net plus optional ridge floor on feature dimensions.
+        """Context-layer ridge by default; all intercept coefficients are free.
 
         Basal intercept rates are left unpenalized, matching the current source-code
         intent that cohort-level rates should remain anchored while covariate effects
@@ -228,7 +296,13 @@ class ProEHNTopologyModel:
         """
 
         W_theta, W_dp, W_dm = self.parse_params(params_flat)
-        l1 = jnp.sum(jnp.abs(W_theta[1:])) + jnp.sum(jnp.abs(W_dp[1:])) + jnp.sum(jnp.abs(W_dm[1:]))
+        l1 = (
+            jnp.sum(jnp.abs(W_theta[1:]))
+            + jnp.sum(jnp.abs(W_dp[1:]))
+            + jnp.sum(jnp.abs(W_dm[1:]))
+        )
         l2 = jnp.sum(W_theta[1:] ** 2) + jnp.sum(W_dp[1:] ** 2) + jnp.sum(W_dm[1:] ** 2)
         alpha = self.l1_ratio
-        return self.regularization_strength * (alpha * l1 + (1.0 - alpha + self.l2_floor) * l2)
+        return self.regularization_strength * (
+            alpha * l1 + (1.0 - alpha + self.l2_floor) * l2
+        )

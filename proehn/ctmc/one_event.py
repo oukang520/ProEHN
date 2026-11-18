@@ -45,14 +45,17 @@ def R_i_inv_vec(
 
 def _lp_coupled_0(log_theta, log_d_p, log_d_m, state_joint):
     from .likelihood import _lp_coupled_0 as general
+
     return general(log_theta, log_d_p, log_d_m, state_joint, 1, 1)
 
 
 def _lp_coupled_1(log_theta, log_d_p, log_d_m, state_joint):
     from .likelihood import _lp_coupled_1 as general
+
     return general(log_theta, log_d_p, log_d_m, state_joint, 1, 1)
 
 
 def _lp_coupled_2(log_theta, log_d_p, log_d_m, state_joint):
     from .likelihood import _lp_coupled_2 as general
+
     return general(log_theta, log_d_p, log_d_m, state_joint, 1, 1)

@@ -4,28 +4,32 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "proehn"
-version = "1.0.1"
+version = "1.1.0"
 description = "ProEHN: context-aware evolutionary hazard network for cancer progression."
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "Research use only"}
+license = {file = "LICENSE"}
 authors = [
   {name = "ProEHN authors"}
 ]
 dependencies = [
-  "jax>=0.4.20",
-  "jaxlib>=0.4.20",
-  "flax>=0.8.0",
-  "optax>=0.2.0",
-  "numpy>=1.24",
-  "pandas>=2.0",
-  "scipy>=1.10",
-  "scikit-learn>=1.3",
-  "PyYAML>=6.0"
+  "jax==0.4.38",
+  "jaxlib==0.4.38",
+  "flax==0.10.4",
+  "optax==0.2.4",
+  "numpy==1.26.4",
+  "pandas==2.2.3",
+  "scipy==1.14.1",
+  "scikit-learn==1.5.2",
+  "PyYAML==6.0.2"
 ]
 
 [tool.setuptools.packages.find]
-include = ["proehn*"]
+include = ["proehn", "proehn.*"]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
+[tool.setuptools.package-data]
+proehn = ["*.R"]
+
+[project.optional-dependencies]
+clinical = ["lifelines==0.30.0"]
+comparators = ["mhn==1.2.3", "metmhn @ git+https://github.com/cbg-ethz/metMHN.git@616708143620aa0dfbab5d55f06d0413af21fb69"]

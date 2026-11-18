@@ -1,41 +1,73 @@
-# ProEHN
+# Runtime environment
 
-ProEHN is a context-aware evolutionary hazard network for cancer progression.
+Use Python 3.11 (64-bit) on Windows, Linux or WSL2. CPU execution is supported.
 
-## Web application
+```sh
+python -m venv .venv
+```
 
-The research web interface is available at **[https://47.239.63.248/](https://47.239.63.248/)**.
+Activate the environment:
 
-## Model core
+```powershell
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+```
 
-ProEHN combines three components:
+```sh
+# Linux / WSL2
+source .venv/bin/activate
+```
 
-- **Evolutionary kinetics (K):** estimates the probability of continued progression, `P(Go) = 1 - P(Stop)`, from the observed patient state and covariates.
-- **Evolutionary topology (T):** uses a covariate-modulated continuous-time Markov chain to model accessible primary-tumor, metastatic-tumor, and seeding transitions.
-- **Next-event synthesis:** scores each accessible event `e` as `P(Go) * lambda_e / sum_a lambda_a`, combining progression probability with the event's conditional topology probability.
+Install the pinned Python runtime:
 
-## Runtime environment
-
-- Python 3.10+
-- JAX and JAXlib 0.4.20+
-- Flax 0.8+ and Optax 0.2+
-- NumPy 1.24+, pandas 2.0+, SciPy 1.10+, scikit-learn 1.3+, and PyYAML 6.0+
-
-```bash
+```sh
+python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-## Datasets
+Enable double precision before running Python:
 
-- **PACA-AU and MELA-AU:** [ICGC 25K legacy Release 28](https://docs.icgc-argo.org/docs/data-access/icgc-25k-data)
-- **LUAD:** [AACR Project GENIE 19.0-public access page](https://aacrprojectgenie.org/data/)
+```powershell
+$env:JAX_ENABLE_X64="true"
+$env:OMP_NUM_THREADS="1"
+$env:OPENBLAS_NUM_THREADS="1"
+```
 
-Patient-level source data are not redistributed in this repository. Access and use them under the source repositories' terms.
+```sh
+export JAX_ENABLE_X64=true
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+```
 
-## Core commands
+Optional survival-analysis dependencies:
 
-```bash
-python scripts/train_kinetic.py --config configs/cohorts/paca.yaml --data data.csv
-python scripts/train_topology.py --config configs/cohorts/paca.yaml --data data.csv
-python scripts/run_paca_examples.py --experiments proehn_metrics --topology-data examples/paca_processed_data.csv
+```sh
+python -m pip install -e ".[clinical]"
+```
+
+Optional MHN and official metMHN dependencies require Git and a compiler when wheels are unavailable:
+
+```sh
+python -m pip install -e ".[comparators]"
+```
+
+The R comparator adapters require R 4.5.1 with `Rscript` on `PATH`,
+`Oncotree` 0.3.5, `hypertrapsct` 0.99.0 and `jsonlite` installed in the R library.
+Install their pinned sources from R (a native compiler toolchain is needed when building packages):
+
+```r
+install.packages(c("remotes", "jsonlite"), repos = "https://cloud.r-project.org")
+remotes::install_version("Rcpp", version = "1.1.2", upgrade = "never",
+                        repos = "https://cloud.r-project.org")
+remotes::install_version("Oncotree", version = "0.3.5", upgrade = "never",
+                        repos = "https://cloud.r-project.org")
+remotes::install_github("StochasticBiology/hypertrapsct@b70b459cb3ec717712fa914f5a1c91b02d5de186",
+                       dependencies = NA, upgrade = "never")
+```
+
+Use `--rscript` to specify the R executable when it is outside `PATH`.
+Use `R_LIBS_USER` for a custom R package-library directory.
+
+```sh
+python -c "import jax, proehn; print(proehn.__version__, jax.config.x64_enabled)"
 ```

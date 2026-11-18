@@ -32,16 +32,10 @@ def R_i_inv_vec(
 ) -> jnp.ndarray:
     """Solve the coupled observation resolvent used for paired samples."""
 
-    lidg = -1.0 / (
-        kron_diag(log_theta=log_theta, state=state, n_state=state_size)
-        - (diag_scal_p(log_d_p, state, jnp.ones_like(x)) + diag_scal_m(log_d_m, state, jnp.ones_like(x)))
+    diagnosis = diag_scal_p(log_d_p, state, jnp.ones_like(x)) + diag_scal_m(
+        log_d_m, state, jnp.ones_like(x)
     )
-    y = lidg * x
-
-    def body_fun(_: int, carry: jnp.ndarray) -> jnp.ndarray:
-        return lidg * (kronvec(log_theta=log_theta, p=carry, state=state, diag=False, transpose=transpose) + x)
-
-    return lax.fori_loop(0, state_size + 1, body_fun, y)
+    return R_inv_vec(log_theta, x, state, state_size, diagnosis, transpose)
 
 
 def cond_p_obs(
@@ -53,16 +47,22 @@ def cond_p_obs(
 ) -> jnp.ndarray:
     # Project every compatible first-observation state, including seed=0 for PT.
     x, _ = mhn._states(state_joint, n_joint)
-    n = (state_joint.shape[0]-1)//2
-    single_target = jnp.r_[state_joint[1:2*n:2], 1] if pt_first else state_joint[0::2]
-    single_x = jnp.column_stack((x[:, 1:2*n:2] if pt_first else x[:, 0:2*n:2], x[:, -1]))
+    n = (state_joint.shape[0] - 1) // 2
+    single_target = (
+        jnp.r_[state_joint[1 : 2 * n : 2], 1] if pt_first else state_joint[0::2]
+    )
+    single_x = jnp.column_stack(
+        (x[:, 1 : 2 * n : 2] if pt_first else x[:, 0 : 2 * n : 2], x[:, -1])
+    )
     active = jnp.where(single_target == 1, size=n_single)[0]
     indices = single_x[:, active] @ (1 << jnp.arange(n_single))
     compatible = obs_states(n_joint, state_joint, pt_first)
-    return jnp.zeros(2**n_single).at[indices].add(pTh1_joint*compatible)
+    return jnp.zeros(2**n_single).at[indices].add(pTh1_joint * compatible)
 
 
-def _lp_prim_obs(log_theta: jnp.ndarray, log_d_p: jnp.ndarray, state_pt: jnp.ndarray, n_prim: int) -> jnp.ndarray:
+def _lp_prim_obs(
+    log_theta: jnp.ndarray, log_d_p: jnp.ndarray, state_pt: jnp.ndarray, n_prim: int
+) -> jnp.ndarray:
     """Primary-only marginal log-likelihood."""
 
     log_theta_pt = diagnosis_theta(log_theta.at[:-1, -1].set(0.0), log_d_p)
@@ -87,50 +87,78 @@ def _lp_met_obs(
     return jnp.log(jnp.maximum(pTh[-1] * d_rates[-1], 1e-50))
 
 
-def _paired_order_probability(log_theta, log_d_p, log_d_m, state_joint,
-                              n_prim, n_met, pt_first, first_seeding=-1):
+def _paired_order_probability(
+    log_theta, log_d_p, log_d_m, state_joint, n_prim, n_met, pt_first, first_seeding=-1
+):
     """Two observation phases. PT sampling does not imply prior seeding.
 
     After first PT sampling the unsampled lineage continues until MT diagnosis;
     MT diagnosis is zero before seeding. After first MT sampling the remaining
     PT continues without a metastatic seed effect. No elapsed time is asserted.
     """
-    n_joint = n_prim+n_met-1
-    p0 = jnp.zeros(2**n_joint).at[0].set(1.)
+    n_joint = n_prim + n_met - 1
+    p0 = jnp.zeros(2**n_joint).at[0].set(1.0)
     occupation = R_i_inv_vec(log_theta, log_d_p, log_d_m, p0, state_joint, n_joint)
-    diagnosed = (diag_scal_p(log_d_p, state_joint, occupation) if pt_first
-                 else diag_scal_m(log_d_m, state_joint, occupation))
+    diagnosed = (
+        diag_scal_p(log_d_p, state_joint, occupation)
+        if pt_first
+        else diag_scal_m(log_d_m, state_joint, occupation)
+    )
     x, _ = mhn._states(state_joint, n_joint)
     diagnosed *= jnp.where(first_seeding < 0, True, x[:, -1] == first_seeding)
     ns = n_met if pt_first else n_prim
     start = cond_p_obs(diagnosed, state_joint, n_joint, ns, pt_first)
-    n = (state_joint.shape[0]-1)//2
-    target = jnp.r_[state_joint[1:2*n:2], 1] if pt_first else state_joint[0::2]
-    theta = log_theta if pt_first else log_theta.at[:-1, -1].set(0.)
-    rates = (diag_scal_m(log_d_m, target, jnp.ones(2**ns)) if pt_first
-             else diag_scal_p(log_d_p, target, jnp.ones(2**ns)))
+    n = (state_joint.shape[0] - 1) // 2
+    target = jnp.r_[state_joint[1 : 2 * n : 2], 1] if pt_first else state_joint[0::2]
+    theta = log_theta if pt_first else log_theta.at[:-1, -1].set(0.0)
+    rates = (
+        diag_scal_m(log_d_m, target, jnp.ones(2**ns))
+        if pt_first
+        else diag_scal_p(log_d_p, target, jnp.ones(2**ns))
+    )
     end = R_inv_vec(theta, start, target, ns, rates)
-    return end[-1]*rates[-1]
+    return end[-1] * rates[-1]
 
 
 def _log_probability(value):
     # Unsupported histories have zero mass, not a tiny artificial likelihood.
     # Mask inside log as well to keep inactive autodiff branches finite.
-    return jnp.where(value > 0, jnp.log(jnp.where(value > 0, value, 1.)), -jnp.inf)
+    return jnp.where(value > 0, jnp.log(jnp.where(value > 0, value, 1.0)), -jnp.inf)
 
 
-def _lp_coupled_0(log_theta, log_d_p, log_d_m, state_joint, n_prim, n_met, first_seeding=-1):
+def _lp_coupled_0(
+    log_theta, log_d_p, log_d_m, state_joint, n_prim, n_met, first_seeding=-1
+):
     """Unknown-order likelihood = sum of PT-first and MT-first joint masses."""
     args = log_theta, log_d_p, log_d_m, state_joint, n_prim, n_met
-    return _log_probability(_paired_order_probability(*args, True, first_seeding)
-                            + _paired_order_probability(*args, False, first_seeding))
+    return _log_probability(
+        _paired_order_probability(*args, True, first_seeding)
+        + _paired_order_probability(*args, False, first_seeding)
+    )
 
 
-def _lp_coupled_1(log_theta, log_d_p, log_d_m, state_joint, n_prim, n_met, first_seeding=-1):
-    return _log_probability(_paired_order_probability(log_theta, log_d_p, log_d_m,
-                           state_joint, n_prim, n_met, True, first_seeding))
+def _lp_coupled_1(
+    log_theta, log_d_p, log_d_m, state_joint, n_prim, n_met, first_seeding=-1
+):
+    return _log_probability(
+        _paired_order_probability(
+            log_theta, log_d_p, log_d_m, state_joint, n_prim, n_met, True, first_seeding
+        )
+    )
 
 
-def _lp_coupled_2(log_theta, log_d_p, log_d_m, state_joint, n_prim, n_met, first_seeding=-1):
-    return _log_probability(_paired_order_probability(log_theta, log_d_p, log_d_m,
-                           state_joint, n_prim, n_met, False, first_seeding))
+def _lp_coupled_2(
+    log_theta, log_d_p, log_d_m, state_joint, n_prim, n_met, first_seeding=-1
+):
+    return _log_probability(
+        _paired_order_probability(
+            log_theta,
+            log_d_p,
+            log_d_m,
+            state_joint,
+            n_prim,
+            n_met,
+            False,
+            first_seeding,
+        )
+    )

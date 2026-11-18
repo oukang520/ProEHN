@@ -13,16 +13,19 @@ import yaml
 class KineticConfig:
     """Configuration for the kinetic gatekeeper K."""
 
-    d_model: int = 128
-    n_head_layers: int = 2
+    d_model: int = 32
+    n_head_layers: int = 1
     dropout_rate: float = 0.2
     focal_gamma: float = 0.0
-    calibration: str = "none"
-    learning_rate: float = 1e-4
-    batch_size: int = 32
+    calibration: str = "platt"
+    learning_rate: float = 0.001
+    weight_decay: float = 0.0001
+    batch_size: int | None = None
     num_epochs: int = 150
-    patience: int = 15
-    stop_threshold: float = 0.90
+    patience: int = 20
+    early_stopping: bool = False
+    random_seed: int = 11
+    stop_threshold: float | None = None
     fallback_go_probability: float = 0.85
 
 
@@ -30,15 +33,21 @@ class KineticConfig:
 class TopologyConfig:
     """Configuration for the feature-modulated topology engine T."""
 
-    top_n_genes: int = 20
+    top_n_genes: int = 12
     max_batch_size: int = 1
-    max_active_events: int = 18
-    regularization_strength: float = 0.01
-    l1_ratio: float = 1.0
+    max_active_events: int = 25
+    regularization_strength: float = 0.002
+    l1_ratio: float = 0.0
     l2_floor: float = 0.0
-    log_rate_clip_min: float = -20.0
-    log_rate_clip_max: float = 20.0
-    optimizer_maxiter: int = 500
+    log_rate_clip_min: float = -5.0
+    log_rate_clip_max: float = 5.0
+    optimizer_maxiter: int = 1200
+    optimizer_bound: float = 4.0
+    optimizer_ftol: float = 1e-8
+    random_seed: int = 11
+    gene_names: tuple[str, ...] = ()
+    architecture: str = "auto"
+    no_covariates: bool = False
     use_bio_pure_features: bool = False
     min_mutations: int | None = None
     max_mutations: int | None = None
@@ -49,9 +58,9 @@ class TopologyConfig:
 class ArtifactConfig:
     """Model artifact paths."""
 
-    kinetic_params: str = "artifacts/proehn_kinetic_params.msgpack"
-    kinetic_metadata: str = "artifacts/proehn_kinetic_metadata.pkl"
-    topology_model: str = "artifacts/proehn_topology_model.npz"
+    kinetic_params: str = "../ProEHN_runs/artifacts/proehn_kinetic_params.msgpack"
+    kinetic_metadata: str = "../ProEHN_runs/artifacts/proehn_kinetic_metadata.pkl"
+    topology_model: str = "../ProEHN_runs/artifacts/proehn_topology_model.npz"
 
 
 @dataclass(frozen=True)
@@ -73,7 +82,7 @@ class ProEHNConfig:
     """Top-level ProEHN configuration."""
 
     project_name: str = "ProEHN"
-    random_seed: int = 42
+    random_seed: int = 11
     data: DataConfig = field(default_factory=DataConfig)
     kinetic: KineticConfig = field(default_factory=KineticConfig)
     topology: TopologyConfig = field(default_factory=TopologyConfig)
@@ -91,7 +100,10 @@ def _deep_update(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str,
 
 def _dataclass_to_dict(obj: Any) -> Any:
     if hasattr(obj, "__dataclass_fields__"):
-        return {key: _dataclass_to_dict(getattr(obj, key)) for key in obj.__dataclass_fields__}
+        return {
+            key: _dataclass_to_dict(getattr(obj, key))
+            for key in obj.__dataclass_fields__
+        }
     if isinstance(obj, tuple):
         return list(obj)
     return obj
@@ -109,5 +121,8 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         user_config = yaml.safe_load(handle) or {}
     merged = _deep_update(defaults, user_config)
     from .probability import KineticProbabilityProtocol
-    KineticProbabilityProtocol(float(merged['kinetic']['focal_gamma']), merged['kinetic']['calibration'])
+
+    KineticProbabilityProtocol(
+        float(merged["kinetic"]["focal_gamma"]), merged["kinetic"]["calibration"]
+    )
     return merged

@@ -1,0 +1,56 @@
+project_name: ProEHN
+cohort: GENIE
+random_seed: 11
+genes: [TP53, KRAS, EGFR, KEAP1, STK11, KMT2D, RBM10, ATM, NF1, RB1, FAT1, SMARCA4]
+data:
+  patient_id_column: patient_id
+  primary_prefix: P.
+  metastasis_prefix: M.
+  mutation_suffix: ''
+  stop_label_column: Patient_Label
+kinetic:
+  d_model: 32
+  n_head_layers: 1
+  dropout_rate: 0.2
+  focal_gamma: 0.0
+  calibration: platt
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  batch_size: null
+  num_epochs: 150
+  patience: 20
+  class_weights: null
+topology:
+  top_n_genes: 12
+  architecture: full
+  feature_columns: [age, background_nMut, background_VAF_mean]
+  regularization_strength: 0.002
+  l1_ratio: 0.0
+  l2_floor: 0.0
+  optimizer_maxiter: 1200
+  optimizer_bound: 4.0
+  optimizer_ftol: 1.0e-8
+  log_rate_clip_min: -5.0
+  log_rate_clip_max: 5.0
+folds:
+  count: 5
+  test: outer
+  validation_offset: 1
+  native_fit: [1, 2, 3, 4]
+  clinical_training: [2, 3, 4]
+  clinical_validation: [1]
+  clinical_test: [0]
+  snapshot_selected: [legacy, legacy, legacy, legacy, legacy]
+  snapshot_counts: [[9348, 3132, 3156], [9371, 3133, 3132], [9406, 3097, 3133], [9421, 3118, 3097], [9362, 3156, 3118]]
+clinical:
+  horizon_days: 180
+  sequencing_landmark: true
+  survival_cox_penalizer: 0.01
+  survival_baseline: [age, log1p_background_nMut, background_VAF_mean, metastasis_available]
+  survival_added_score: logit_go
+  survival_bootstrap: 2000
+  survival_permutations: 10000
+  survival_probability_clip: [0.000001, 0.999999]
+  risk_threshold: 0.4677606944372642
+  capacity_threshold: 0.63204149
+  capacity_fraction: 0.2

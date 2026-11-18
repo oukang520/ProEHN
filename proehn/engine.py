@@ -13,7 +13,12 @@ from scipy.special import softmax
 from .kinetic import ProEHNKineticGatekeeper
 from .topology import ProEHNTopologyModel
 from .features import FoldPreprocessor
-from .representation import accessible_transition_log_rates, posterior_transition_representation, patient_transition_representation, PosteriorInferenceProtocol
+from .representation import (
+    accessible_transition_log_rates,
+    posterior_transition_representation,
+    patient_transition_representation,
+    PosteriorInferenceProtocol,
+)
 
 
 class ProEHNEngine:
@@ -40,10 +45,20 @@ class ProEHNEngine:
         self.preprocessing = None
         self.fold_preprocessor = None
         if topology_preprocessing_path:
-            self.preprocessing = json.loads(Path(topology_preprocessing_path).read_text(encoding='utf-8'))
-        from .evaluation import CalibratedThreshold, PrespecifiedThresholdProtocol
-        if stop_threshold is not None and (not isinstance(stop_threshold, (CalibratedThreshold, PrespecifiedThresholdProtocol)) or stop_threshold.score_semantics != 'operational_stop'):
-            raise ValueError('Binary Stop decisions require an operational_stop threshold with provenance')
+            self.preprocessing = json.loads(
+                Path(topology_preprocessing_path).read_text(encoding="utf-8")
+            )
+        from .thresholds import CalibratedThreshold, PrespecifiedThresholdProtocol
+
+        if stop_threshold is not None and (
+            not isinstance(
+                stop_threshold, (CalibratedThreshold, PrespecifiedThresholdProtocol)
+            )
+            or stop_threshold.score_semantics != "operational_stop"
+        ):
+            raise ValueError(
+                "Binary Stop decisions require an operational_stop threshold with provenance"
+            )
         self.stop_threshold = stop_threshold
         self._runtime_inference_protocol = inference_protocol
         self.inference_protocol = inference_protocol or PosteriorInferenceProtocol()
@@ -78,76 +93,112 @@ class ProEHNEngine:
         log_rate_clip_max: float,
     ) -> None:
         from .artifacts import load_topology_artifact
+
         if self.preprocessing is not None:
-            raise ValueError('Formal inference uses embedded training preprocessing only')
-        self.topology_model, params, self.scientific_metadata, self.fold_preprocessor = load_topology_artifact(
-            topology_model_path, regularization_strength=regularization_strength,
-            log_rate_clip_min=log_rate_clip_min, log_rate_clip_max=log_rate_clip_max)
-        saved_inference = self.scientific_metadata.training_protocol.get('posterior_inference')
+            raise ValueError(
+                "Formal inference uses embedded training preprocessing only"
+            )
+        (
+            self.topology_model,
+            params,
+            self.scientific_metadata,
+            self.fold_preprocessor,
+        ) = load_topology_artifact(
+            topology_model_path,
+            regularization_strength=regularization_strength,
+            log_rate_clip_min=log_rate_clip_min,
+            log_rate_clip_max=log_rate_clip_max,
+        )
+        saved_inference = self.scientific_metadata.training_protocol.get(
+            "posterior_inference"
+        )
         if saved_inference is not None:
             saved_protocol = PosteriorInferenceProtocol(**saved_inference)
-            if self._runtime_inference_protocol is not None and self._runtime_inference_protocol != saved_protocol:
-                raise ValueError('Runtime posterior inference conflicts with saved protocol')
+            if (
+                self._runtime_inference_protocol is not None
+                and self._runtime_inference_protocol != saved_protocol
+            ):
+                raise ValueError(
+                    "Runtime posterior inference conflicts with saved protocol"
+                )
             self.inference_protocol = saved_protocol
         self.topology_params = jnp.asarray(params)
         self.gene_names = list(self.scientific_metadata.gene_names)
         self.feature_names = list(self.scientific_metadata.feature_names)
-        self.W_theta, self.W_dp, self.W_dm = self.topology_model.parse_params(self.topology_params)
+        self.W_theta, self.W_dp, self.W_dm = self.topology_model.parse_params(
+            self.topology_params
+        )
         self.topology_ready = True
 
     def _feature_vector(self, patient_data: Mapping[str, Any]) -> jnp.ndarray:
         if self.fold_preprocessor is not None:
             import pandas as pd
-            features = self.fold_preprocessor.transform(pd.DataFrame([patient_data]))[0]
-            return jnp.asarray(np.r_[1., features])
+
+            frame = pd.DataFrame([patient_data]).reindex(
+                columns=self.fold_preprocessor.columns
+            )
+            features = self.fold_preprocessor.transform(frame)[0]
+            return jnp.asarray(np.r_[1.0, features])
         if self.feature_names and self.preprocessing is None:
-            raise ValueError('Training preprocessing metadata is required; evaluation-batch fitting is forbidden')
+            raise ValueError(
+                "Training preprocessing metadata is required; evaluation-batch fitting is forbidden"
+            )
         values = [1.0]
         for name in self.feature_names:
             if name.lower() in {"bias", "intercept"}:
                 continue
             values.append(float(patient_data.get(name, 0.0)))
 
-        expected = self.topology_model.n_features if self.topology_model is not None else len(values)
+        expected = (
+            self.topology_model.n_features
+            if self.topology_model is not None
+            else len(values)
+        )
         if len(values) < expected:
             values.extend([0.0] * (expected - len(values)))
         elif len(values) > expected:
             values = values[:expected]
         if self.preprocessing:
-            features=np.asarray(values[1:],dtype=np.float64)
-            if self.preprocessing['transform']=='log1p_nonnegative_zscore_clip3':
-                features=np.log1p(np.maximum(features,0))
-            features=(features-np.asarray(self.preprocessing['mean']))/np.asarray(self.preprocessing['scale'])
-            if self.preprocessing['transform']=='log1p_nonnegative_zscore_clip3':
-                features=np.clip(features,-3,3)
-            values=[1.0,*features.tolist()]
-        vector=jnp.array(values)
+            features = np.asarray(values[1:], dtype=np.float64)
+            if self.preprocessing["transform"] == "log1p_nonnegative_zscore_clip3":
+                features = np.log1p(np.maximum(features, 0))
+            features = (features - np.asarray(self.preprocessing["mean"])) / np.asarray(
+                self.preprocessing["scale"]
+            )
+            if self.preprocessing["transform"] == "log1p_nonnegative_zscore_clip3":
+                features = np.clip(features, -3, 3)
+            values = [1.0, *features.tolist()]
+        vector = jnp.array(values)
         if not np.isfinite(np.asarray(vector)).all():
-            raise ValueError('Topology covariates exceed numeric range')
+            raise ValueError("Topology covariates exceed numeric range")
         return vector
 
-    def _genotype_vectors(self, patient_data: Mapping[str, Any]) -> tuple[list[int], list[int], bool]:
+    def _genotype_vectors(
+        self, patient_data: Mapping[str, Any]
+    ) -> tuple[list[int], list[int], bool]:
         pt_vec: list[int] = []
         mt_vec: list[int] = []
         seed = patient_data.get("Seeding", patient_data.get("has_metastasis"))
         if seed not in (0, 1):
-            raise ValueError("Specify observed Seeding as 0 or 1; unknown seeding requires latent-state inference")
+            raise ValueError(
+                "Specify observed Seeding as 0 or 1; unknown seeding requires latent-state inference"
+            )
         has_metastasis = bool(seed)
-        if not has_metastasis and any(value == 1 for name, value in patient_data.items()
-                                      if name.startswith("M.") and name.endswith(" (M)")):
-            raise ValueError("Seeding=0 conflicts with observed metastatic mutations")
 
         for gene in self.gene_names:
             p_val = patient_data.get(f"P.{gene} (M)", patient_data.get(f"P.{gene}"))
             m_val = patient_data.get(f"M.{gene} (M)", patient_data.get(f"M.{gene}"))
             if p_val not in (0, 1) or m_val not in (0, 1):
-                raise ValueError('Observed genomic indicators must be binary')
+                raise ValueError("Observed genomic indicators must be binary")
             pt_vec.append(p_val)
             mt_vec.append(m_val)
-            has_metastasis = has_metastasis or bool(m_val)
+        if not has_metastasis and any(mt_vec) and pt_vec != mt_vec:
+            raise ValueError("Before seeding the two inherited copies must agree")
         return pt_vec, mt_vec, has_metastasis
 
-    def _transition_log_rates(self, patient_data: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _transition_log_rates(
+        self, patient_data: Mapping[str, Any]
+    ) -> list[dict[str, Any]]:
         """Compute accessible topological hazards for one patient."""
 
         if not self.topology_ready or self.topology_model is None:
@@ -164,10 +215,14 @@ class ProEHNEngine:
         )
         theta_np = np.asarray(theta, dtype=np.float64)
         pt_vec, mt_vec, has_metastasis = self._genotype_vectors(patient_data)
-        return accessible_transition_log_rates(theta_np, self.gene_names, pt_vec, mt_vec, has_metastasis)
+        return accessible_transition_log_rates(
+            theta_np, self.gene_names, pt_vec, mt_vec, has_metastasis
+        )
 
     @staticmethod
-    def _probability_diagnostics(prob_go: float, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    def _probability_diagnostics(
+        prob_go: float, rows: list[dict[str, Any]]
+    ) -> dict[str, Any]:
         """Expose probability-mass and boundary diagnostics without changing model scores.
 
         The caller attaches the saved calibration method. Saturation describes
@@ -176,7 +231,9 @@ class ProEHNEngine:
 
         conditional_mass = float(sum(row["topology_probability"] for row in rows))
         integrated_mass = float(sum(row["integrated_event_score"] for row in rows))
-        max_conditional = float(max((row["topology_probability"] for row in rows), default=0.0))
+        max_conditional = float(
+            max((row["topology_probability"] for row in rows), default=0.0)
+        )
         boundary_tolerance = 1e-12
         saturated = bool(
             prob_go <= boundary_tolerance
@@ -194,62 +251,238 @@ class ProEHNEngine:
 
     def _representation(self, patient_data, *, covariates=None):
         if not self.topology_ready:
-            raise RuntimeError('Fitted topology components required')
+            raise RuntimeError("Fitted topology components required")
         z = self._feature_vector(patient_data if covariates is None else covariates)
-        if 'observation_type' not in patient_data:
-            if patient_data.get('joint_snapshot') != 1:
-                raise ValueError('Explicit observation_type or joint_snapshot=1 is required')
+        if "observation_type" not in patient_data:
+            if patient_data.get("joint_snapshot") != 1:
+                raise ValueError(
+                    "Explicit observation_type or joint_snapshot=1 is required"
+                )
             pt, mt, seed = self._genotype_vectors(patient_data)
-            return patient_transition_representation(self.topology_model, self.topology_params, z,
-                self.gene_names, pt, mt, seed)
-        from .observations import ObservationType
-        kind = ObservationType(patient_data['observation_type'])
+            return patient_transition_representation(
+                self.topology_model,
+                self.topology_params,
+                z,
+                self.gene_names,
+                pt,
+                mt,
+                seed,
+            )
+        from .observations import observed_record_type
+
+        kind = observed_record_type(
+            patient_data["observation_type"], patient_data.get("observed_seeding")
+        )
+
         def genotype(prefix):
-            return [patient_data.get(f'{prefix}.{g} (M)', patient_data.get(f'{prefix}.{g}')) for g in self.gene_names]
-        seed = patient_data.get('observed_seeding', patient_data.get('Seeding'))
-        if seed is not None and (seed not in (0, 1) or (kind != 4 and seed != (0 if kind == 0 else 1))):
-            raise ValueError('Seeding annotation conflicts with observation type')
-        if kind == 4 and seed is not None:
-            raise ValueError('Known seeding needs an explicit known-seeding observation type')
+            return [
+                patient_data.get(f"{prefix}.{g} (M)", patient_data.get(f"{prefix}.{g}"))
+                for g in self.gene_names
+            ]
+
         from dataclasses import asdict
-        return posterior_transition_representation(self.topology_model, self.topology_params, z,
-            self.gene_names, genotype('P') if kind != 2 else None,
-            genotype('M') if kind in (2, 3) else None, kind,
-            diagnosis_order=patient_data.get('diag_order'),
-            first_seeding=patient_data.get('seeding_at_first_observation', -1),
-            joint_snapshot=patient_data.get('joint_snapshot', False), **asdict(self.inference_protocol))
+
+        return posterior_transition_representation(
+            self.topology_model,
+            self.topology_params,
+            z,
+            self.gene_names,
+            genotype("P") if kind != 2 else None,
+            genotype("M") if kind in (2, 3) else None,
+            kind,
+            diagnosis_order=(
+                patient_data.get("diag_order")
+                if patient_data.get("diag_order") is not None
+                else 0
+            ),
+            first_seeding=(
+                patient_data.get("seeding_at_first_observation")
+                if patient_data.get("seeding_at_first_observation") is not None
+                else -1
+            ),
+            joint_snapshot=patient_data.get("joint_snapshot", False),
+            **asdict(self.inference_protocol),
+        )
 
     def _result(self, representation, prob_go, patient_id=None):
         integrated = representation.integrated_scores(prob_go)
-        rows = [dict(compartment=key[0], event=key[1], topology_probability=float(p),
-                     integrated_event_score=float(score))
-                for key, p, score in zip(representation.accessible_events,
-                    representation.conditional_probabilities, integrated)]
-        rows.sort(key=lambda row: row['integrated_event_score'], reverse=True)
+        rows = [
+            dict(
+                compartment=key[0],
+                event=key[1],
+                topology_probability=float(p),
+                integrated_event_score=float(score),
+            )
+            for key, p, score in zip(
+                representation.accessible_events,
+                representation.conditional_probabilities,
+                integrated,
+            )
+        ]
+        rows.sort(key=lambda row: row["integrated_event_score"], reverse=True)
         diagnostics = self._probability_diagnostics(prob_go, rows)
-        diagnostics['calibration'] = self.kinetic.probability_protocol.calibration
-        result = dict(prob_go=float(prob_go), prob_stop=float(1-prob_go),
-            integrated_event_scores=rows, probability_diagnostics=diagnostics,
-            representation_kind=getattr(representation, 'representation_kind', 'fully_observed'),
-            terminal_probability=getattr(representation, 'terminal_probability', sum(float(p) for key, p in zip(representation.accessible_events, representation.conditional_probabilities) if key[0] == 'terminal')),
-            inference_method=getattr(representation,'inference_method','fully_observed'),
-            inference_diagnostics=getattr(representation,'inference_diagnostics',{}),
-            score_semantics='P(Go) times posterior-averaged conditional transition direction; no time horizon')
+        diagnostics["calibration"] = self.kinetic.probability_protocol.calibration
+        result = dict(
+            prob_go=float(prob_go),
+            prob_stop=float(1 - prob_go),
+            integrated_event_scores=rows,
+            probability_diagnostics=diagnostics,
+            representation_kind=getattr(
+                representation, "representation_kind", "fully_observed"
+            ),
+            terminal_probability=getattr(
+                representation,
+                "terminal_probability",
+                sum(
+                    float(p)
+                    for key, p in zip(
+                        representation.accessible_events,
+                        representation.conditional_probabilities,
+                    )
+                    if key[0] == "terminal"
+                ),
+            ),
+            inference_method=getattr(
+                representation, "inference_method", "fully_observed"
+            ),
+            inference_diagnostics=getattr(representation, "inference_diagnostics", {}),
+            score_semantics="P(Go) times posterior-averaged conditional transition direction; no time horizon",
+        )
+        result["decision_scores"] = [
+            dict(event="Stop", compartment="clinical", probability=float(1 - prob_go))
+        ] + [
+            dict(
+                event=row["event"],
+                compartment=row["compartment"],
+                probability=row["integrated_event_score"],
+            )
+            for row in rows
+        ]
+        diagnostics["decision_mass"] = float(
+            (1 - prob_go) + diagnostics["integrated_mass"]
+        )
         if self.stop_threshold is not None:
-            from .evaluation import CalibratedThreshold
-            if isinstance(self.stop_threshold,CalibratedThreshold) and patient_id is None:
-                raise ValueError('Patient identity required to check threshold calibration isolation')
-            result['operational_stop_predicted'] = bool(self.stop_threshold.apply([1-prob_go],test_patient_ids=[patient_id])[0])
+            from .thresholds import CalibratedThreshold
+
+            if (
+                isinstance(self.stop_threshold, CalibratedThreshold)
+                and patient_id is None
+            ):
+                raise ValueError(
+                    "Patient identity required to check threshold calibration isolation"
+                )
+            result["operational_stop_predicted"] = bool(
+                self.stop_threshold.apply([1 - prob_go], test_patient_ids=[patient_id])[
+                    0
+                ]
+            )
         return result
 
     def predict(self, patient_data: Mapping[str, Any]) -> dict[str, Any]:
         representation = self._representation(patient_data)
-        return self._result(representation, self.kinetic.predict_go_probability(patient_data), patient_data.get('patient_id'))
+        return self._result(
+            representation,
+            self.kinetic.predict_go_probability(patient_data),
+            patient_data.get("patient_id"),
+        )
+
+    def predict_masked_genotype(self, patient_data, target_gene, compartment="primary"):
+        """Eq. (7): baseline target probability from native record likelihoods.
+
+        Context is transformed once and fixed between candidate target values;
+        the other observed tissue and diagnosis-order annotations are retained.
+        This is reconstruction of baseline status, separate from the next event.
+        """
+        from .observations import observed_record_type
+        from scipy.special import expit
+
+        if not self.topology_ready or self.topology_model is None:
+            raise RuntimeError("Fitted topology components are required")
+        if target_gene not in self.gene_names or compartment not in (
+            "primary",
+            "metastasis",
+        ):
+            raise ValueError("Choose a modeled gene and primary/metastasis compartment")
+        kind = int(
+            observed_record_type(
+                patient_data["observation_type"], patient_data.get("observed_seeding")
+            )
+        )
+        if (compartment == "primary" and kind == 2) or (
+            compartment == "metastasis" and kind != 2 and kind != 3
+        ):
+            raise ValueError("Reconstruct a target only in an observed compartment")
+
+        def genotype(prefix):
+            values = [
+                patient_data.get(f"{prefix}.{g} (M)", patient_data.get(f"{prefix}.{g}"))
+                for g in self.gene_names
+            ]
+            if (prefix == "P") == (compartment == "primary"):
+                values[self.gene_names.index(target_gene)] = 0
+            if not np.isin(values, [0, 1]).all():
+                raise ValueError("The observed compartment must have binary calls")
+            return np.asarray(values, np.int8)
+
+        pt = genotype("P") if kind != 2 else None
+        mt = genotype("M") if kind in (2, 3) else None
+        z = self._feature_vector(patient_data)
+        values = []
+        for value in (0, 1):
+            p, m = None if pt is None else pt.copy(), None if mt is None else mt.copy()
+            (p if compartment == "primary" else m)[
+                self.gene_names.index(target_gene)
+            ] = value
+            if kind == 3:
+                order = patient_data.get("diag_order", 0)
+                first_seed = patient_data.get("seeding_at_first_observation", -1)
+                if order not in (0, 1, 2) or first_seed not in (-1, 0, 1):
+                    raise ValueError("Invalid paired observation annotations")
+                record = np.r_[np.column_stack((p, m)).ravel(), 1, first_seed, order]
+                np_, nm_ = int(p.sum()) + 1, int(m.sum()) + 1
+            elif kind == 2:
+                record, np_, nm_ = np.r_[m, 1], 0, int(m.sum()) + 1
+            else:
+                record = np.r_[p, int(kind == 1)]
+                np_, nm_ = int(p.sum()) + int(kind == 1), 0
+            values.append(
+                -float(
+                    self.topology_model.bucket_loss(
+                        self.topology_params,
+                        kind,
+                        np_,
+                        nm_,
+                        jnp.asarray(record, dtype=jnp.int8)[None, :],
+                        z[None, :],
+                    )
+                )
+            )
+        if np.isnan(values).any() or not np.isfinite(values).any():
+            raise ValueError(
+                "Both candidate target states have zero or invalid likelihood"
+            )
+        return dict(
+            gene=target_gene,
+            compartment=compartment,
+            probability_present=float(expit(values[1] - values[0])),
+            candidate_log_likelihoods=values,
+            score_semantics="conditional baseline genotype status",
+        )
 
     def predict_topology(self, state, observed_patient, prob_go):
         """Evaluate hypothetical state at the original observation-time covariates."""
-        return self._result(self._representation(state, covariates=observed_patient), prob_go, observed_patient.get('patient_id'))
+        return self._result(
+            self._representation(state, covariates=observed_patient),
+            prob_go,
+            observed_patient.get("patient_id"),
+        )
 
     def transition_rates(self, patient_data):
-        return [{"compartment":r["compartment"],"event":r["event"],"rate":float(np.exp(r["log_rate"]))}
-                for r in self._transition_log_rates(patient_data)]
+        return [
+            {
+                "compartment": r["compartment"],
+                "event": r["event"],
+                "rate": float(np.exp(r["log_rate"])),
+            }
+            for r in self._transition_log_rates(patient_data)
+        ]
